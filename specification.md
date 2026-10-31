@@ -43,7 +43,7 @@ P5. **The model is configuration, recorded in the database.** Model id, dimensio
     re-index, never silent corruption.
 
 P6. **Multilingual by default.** The corpus is mostly not English (pt, de, cs, es, fr, mt, ka, …).
-    The default model must be multilingual; English-only models are an explicit opt-in.
+    The default model is multilingual (section 8.1); English-only models are an explicit opt-in.
 
 P7. **Open-source quality.** Typed Python 3.11+, small dependency set, unit tests on fixtures taken
     from real corpora, structured logs, a README that gets a stranger from clone to first search in
@@ -176,7 +176,7 @@ glv search "prazo de prescrição" --country brazil --top 10
 `glv tui` opens a three-screen terminal application built on Textual:
 
 ```
-┌ global-law-vector ──────────────────────────────── model: multilingual-e5-small ┐
+┌ global-law-vector ──────────────────────────── model: arctic-embed-m-v2.0 (768) ┐
 │ Filter: bra_                                                                     │
 │                                                                                  │
 │ [x] brazil                       14 corpora   365,210 files   1.9 GB   ~1h 05m  │
@@ -272,7 +272,7 @@ CREATE TABLE global_law.chunk (
   heading_path  text,                        -- "§ 1 > (2)"
   text          text NOT NULL,
   token_count   int NOT NULL,
-  embedding     vector(384) NOT NULL,        -- dims from config; halfvec if space matters
+  embedding     halfvec(768) NOT NULL,       -- dims from config (768 for arctic-embed-m-v2.0)
   UNIQUE (document_id, ordinal)
 );
 
@@ -282,18 +282,51 @@ CREATE TABLE global_law.index_meta (         -- model id, dims, max tokens, chun
 );
 
 -- after the bulk load:
-CREATE INDEX chunk_embedding_hnsw ON global_law.chunk USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX chunk_embedding_hnsw ON global_law.chunk USING hnsw (embedding halfvec_cosine_ops);
 CREATE INDEX chunk_document_idx   ON global_law.chunk (document_id);
 CREATE INDEX document_corpus_idx  ON global_law.document (corpus_id);
 ```
 
-Sizing at 384 dimensions for the whole tree: about 5 million chunks × 1.5 KB ≈ 7.5 GB of vectors
-plus a comparable HNSW index. `halfvec` halves both. A typical selection is far smaller.
+Sizing at 768 dimensions for the whole tree: about 5 million chunks × 1.5 KB (`halfvec`) ≈ 7.5 GB
+of vectors plus a comparable HNSW index; `vector` (float32) doubles both. A typical selection is
+far smaller.
 
 ## 8. Pipeline and performance
 
-- Embedding on CPU through TEI runs on the order of 100–300 chunks/s for a small model, so the
-  whole tree is 5–15 hours and Brazil alone about one hour. The cost estimate in the TUI and in
+### 8.1 Embedding service
+
+The host runs Hugging Face text-embeddings-inference as container `utility-embeddings`, defined
+in `global-law-utility/docker-compose.yml`, serving `Snowflake/snowflake-arctic-embed-m-v2.0`.
+
+| Property | Value |
+| --- | --- |
+| Endpoint on the host | `http://127.0.0.1:8080` |
+| Endpoint on the Docker network `utility` | `http://utility-embeddings:80` |
+| Dimensions | 768 |
+| Input limit | 8,192 tokens |
+| Query prefix | `query: ` (documents take no prefix) |
+| Languages | multilingual; a Portuguese law sentence scored 0.68 against an English election query and 0.75 against the Portuguese one, an unrelated sentence below zero |
+
+The utility reads the model's `/info` endpoint on start, compares it with `index_meta`, and
+refuses to write into an index built with another model or dimension (P5). `TEI_URL` in config
+defaults to the host endpoint.
+
+Reachability note: the port is bound to `127.0.0.1` on the host, so a devcontainer on its own
+Docker network cannot see it. Either run the utility on the host, attach the devcontainer to the
+`utility` network and use `http://utility-embeddings:80`, or bind the port on all interfaces.
+
+### 8.2 Chunking under an 8k-token limit
+
+The input limit no longer forces splitting: 99.9% of files fit in one chunk. Splitting is kept
+for retrieval quality, not for the model. Default target is 1,024 tokens per chunk, configurable,
+splitting on headings then paragraphs; a whole act of 200 KB (Czechia) becomes a few dozen chunks
+with its heading path, which is what a search result should land on.
+
+### 8.3 Throughput
+
+- A medium model (about 300 M parameters) on CPU through TEI runs on the order of 20–60 chunks/s,
+  several times slower than the small model first considered. The whole tree is therefore a
+  one-to-three-day job and Brazil national a few hours. The cost estimate in the TUI and in
   `glv select --show` uses a chunks-per-second figure measured on the first run and stored in
   `index_meta`.
 - Load first, build HNSW once, with `maintenance_work_mem` raised for the build. Re-indexing a
@@ -302,14 +335,16 @@ plus a comparable HNSW index. `halfvec` halves both. A typical selection is far 
 
 ## 9. Open decisions
 
-1. **Embedding model.** Default proposed: `intfloat/multilingual-e5-small` (384 dims, 512 tokens,
-   same cost class as the English `snowflake-arctic-embed-xs` currently in the compose file).
-   `BAAI/bge-m3` is better and has an 8k context but is several times slower on CPU.
+1. ~~Embedding model.~~ Closed 2026-10-31: `Snowflake/snowflake-arctic-embed-m-v2.0`, 768
+   dimensions, multilingual, already serving (section 8.1).
 2. **Starting selection.** Proposed: Brazil national plus one or two states, Germany, Malta and
    the US federal code, to validate quality across languages before any multi-hour run.
-3. **Vector type.** `vector(384)` or `halfvec(384)`. Proposed: `halfvec` from the start.
+3. **Vector type.** Proposed and written into the schema: `halfvec(768)`; `vector(768)` is a
+   config switch.
 4. **In-force date per document in v1.** Costs one `git log` per file. Proposed: off by default,
    `--with-dates` flag.
+5. **Chunk target size.** Proposed 1,024 tokens (section 8.2); to be checked against search
+   quality on the starting selection.
 
 ## 10. Milestones
 
