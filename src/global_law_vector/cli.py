@@ -139,6 +139,80 @@ def _open_store(cfg: Config):
     return Store(cfg.database_url, cfg.schema, cfg.vector_type, cfg.dims)
 
 
+REACH_HINT = (
+    "  Both containers bind to 127.0.0.1 on the host. From inside a devcontainer they are not\n"
+    "  on localhost: on the host run `docker network connect utility <devcontainer-name>`,\n"
+    "  then set TEI_URL=http://utility-embeddings:80 and\n"
+    "  DATABASE_URL=postgresql://utility:utility@utility-pgvector:5432/utility in .env."
+)
+
+
+def _check_services(cfg: Config, need_tei: bool = True, need_db: bool = True) -> list[str]:
+    """Fast reachability probes (no retries). Returns the problems found, empty when fine."""
+    problems: list[str] = []
+    if need_tei:
+        from .embed import TEIClient
+
+        if not TEIClient(cfg.tei_url, retries=0, timeout=5).health():
+            problems.append(f"embeddings server not reachable at {cfg.tei_url} (TEI_URL)")
+    if need_db:
+        try:
+            import psycopg
+
+            psycopg.connect(cfg.database_url, connect_timeout=5).close()
+        except Exception as exc:  # noqa: BLE001
+            problems.append(f"database not reachable with DATABASE_URL: {exc}".rstrip())
+    return problems
+
+
+def _preflight(cfg: Config, need_tei: bool = True, need_db: bool = True) -> int:
+    problems = _check_services(cfg, need_tei, need_db)
+    if not problems:
+        return 0
+    for pr in problems:
+        print(f"error: {pr}", file=sys.stderr)
+    print(REACH_HINT, file=sys.stderr)
+    return 1
+
+
+def cmd_check(cfg: Config, args: argparse.Namespace) -> int:
+    """Where everything is and whether it answers."""
+    ok = True
+    try:
+        root = resolve_root(cfg)
+        tree = discover(root)
+        print(f"global-law tree   {root}  ({len(tree.corpora)} corpora)")
+    except FileNotFoundError as exc:
+        print(f"global-law tree   MISSING: {exc}")
+        ok = False
+    print(f"selection file    {cfg.selection_file}"
+          f"{'' if cfg.selection_file.is_file() else '  (not created yet)'}")
+    from .embed import TEIClient
+
+    client = TEIClient(cfg.tei_url, retries=0, timeout=5)
+    if client.health():
+        info = client.info()
+        print(f"embeddings        {cfg.tei_url}  {info.model_id} dims={info.dims} "
+              f"max_tokens={info.max_input_length}")
+        if info.model_id and info.model_id != cfg.model:
+            print(f"                  WARNING: GLV_MODEL is {cfg.model}")
+            ok = False
+    else:
+        print(f"embeddings        UNREACHABLE at {cfg.tei_url}")
+        ok = False
+    problems = _check_services(cfg, need_tei=False, need_db=True)
+    if problems:
+        print(f"database          UNREACHABLE: {problems[0]}")
+        ok = False
+    else:
+        print(f"database          {cfg.database_url}  schema={cfg.schema} "
+              f"{cfg.vector_type}({cfg.dims})")
+    if not ok:
+        print()
+        print(REACH_HINT)
+    return 0 if ok else 1
+
+
 def cmd_index(cfg: Config, args: argparse.Namespace) -> int:
     from .embed import TEIClient, check_model
     from .tokenizer import load_tokenizer
@@ -168,6 +242,8 @@ def cmd_index(cfg: Config, args: argparse.Namespace) -> int:
               f"est. {human_duration(tc / cfg.chunks_per_second)} (tokenizer: {tok.name})")
         return 0
 
+    if _preflight(cfg):
+        return 1
     client = TEIClient(cfg.tei_url)
     info = client.info()
     check_model(info, cfg.model, cfg.dims)
@@ -247,6 +323,8 @@ def cmd_search(cfg: Config, args: argparse.Namespace) -> int:
     from .embed import TEIClient
     from .search import search
 
+    if _preflight(cfg):
+        return 1
     store = _open_store(cfg)
     try:
         hits = search(store, TEIClient(cfg.tei_url), args.query, query_prefix=cfg.query_prefix,
@@ -325,6 +403,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--build-index", action="store_true", help="(re)build the HNSW index after")
     s.add_argument("--no-build-index", action="store_true", help="skip the HNSW build")
     s.set_defaults(func=cmd_index)
+
+    s = sub.add_parser("check", 
+                       help="are the tree, the embeddings server and the database reachable")
+    s.set_defaults(func=cmd_check)
 
     s = sub.add_parser("status", help="per corpus: selected, indexed, stale, partial")
     s.add_argument("--all", action="store_true", help="also list unselected, unindexed corpora")

@@ -25,6 +25,7 @@ python -m venv .venv && . .venv/bin/activate
 pip install -e '.[dev]'          # or `pip install -e .` for the bare CLI
 cp .env.example .env             # defaults match the containers; edit if needed
 
+glv check                        # tree, embeddings server and database reachable?
 glv list                         # the 525 pinned corpora, 213 countries
 glv select --country malta --corpus brazil/national/acts --show
 glv index --dry-run              # parse and chunk, embed nothing
@@ -40,6 +41,7 @@ tree is found at `GLOBAL_LAW_PATH`, else at `./global-law` or `../global-law`.
 
 | Command | Does |
 | --- | --- |
+| `glv check` | Is the tree found, do the embeddings server and the database answer, and with which model. |
 | `glv list [--country X]` | Every corpus in the tree, marking the selected ones. |
 | `glv select --country X --corpus c/l/n --exclude … --all --clear --show` | Edit `selection.toml` and show its cost: files, bytes, estimated chunks and time. |
 | `glv index [--dry-run] [--country …] [--max-files N]` | Index the selection (or a one-off selection). Resumable: a rerun indexes only new, changed or deleted files. |

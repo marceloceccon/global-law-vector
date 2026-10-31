@@ -83,3 +83,18 @@ def test_dotenv_does_not_override_environment(env, monkeypatch):
     cfg = Config.from_env(env / ".env")
     assert cfg.chunk_tokens == 77 and cfg.workers == 2
     assert os.environ["GLV_CHUNK_TOKENS"] == "77"
+
+
+def test_check_reports_unreachable_services(env, monkeypatch, capsys):
+    monkeypatch.setenv("TEI_URL", "http://127.0.0.1:9")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://nobody@127.0.0.1:9/none")
+    assert main(["check"]) == 1
+    out = capsys.readouterr().out
+    assert "7 corpora" in out and "UNREACHABLE" in out and "docker network connect" in out
+
+
+def test_index_fails_fast_when_unreachable(env, monkeypatch, capsys):
+    monkeypatch.setenv("TEI_URL", "http://127.0.0.1:9")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://nobody@127.0.0.1:9/none")
+    assert main(["index", "--offline", "--country", "malta"]) == 1
+    assert "not reachable" in capsys.readouterr().err
