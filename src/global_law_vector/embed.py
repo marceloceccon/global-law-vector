@@ -31,10 +31,12 @@ class ModelInfo:
 
 
 class TEIClient:
-    def __init__(self, base_url: str, timeout: float = 120.0, retries: int = 5) -> None:
+    def __init__(self, base_url: str, timeout: float = 120.0, retries: int = 5,
+                 api_key: str | None = None) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.retries = retries
+        self.api_key = api_key
 
     # --- plumbing ---
 
@@ -43,6 +45,8 @@ class TEIClient:
         data = json.dumps(payload).encode() if payload is not None else None
         req = urllib.request.Request(url, data=data, method="POST" if data else "GET")
         req.add_header("Content-Type", "application/json")
+        if self.api_key:
+            req.add_header("Authorization", f"Bearer {self.api_key}")
         delay = 1.0
         last: Exception | None = None
         for attempt in range(self.retries + 1):
@@ -52,6 +56,11 @@ class TEIClient:
                     return json.loads(body) if body.strip() else None
             except urllib.error.HTTPError as exc:
                 body = exc.read().decode(errors="replace")[:300]
+                if exc.code in (401, 403):
+                    raise EmbeddingError(
+                        f"TEI {path} refused the request (HTTP {exc.code}): set TEI_API_KEY"
+                        if not self.api_key else
+                        f"TEI {path} rejected TEI_API_KEY (HTTP {exc.code})") from exc
                 if exc.code in (429, 500, 502, 503, 504) and attempt < self.retries:
                     last = exc
                     log.warning("TEI %s -> %s, retrying in %.0fs: %s", path, exc.code, delay, body)

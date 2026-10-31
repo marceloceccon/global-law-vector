@@ -308,6 +308,11 @@ class RunScreen(Screen):
         self.app.sub_title = "indexing"
         self.run_index()
 
+    def on_unmount(self) -> None:
+        # Closing the screen or the app must not leave the worker thread embedding forever:
+        # the indexer checks this flag between documents and finishes the current group.
+        self._stop.set()
+
     @work(thread=True, exclusive=True, group="index")
     def run_index(self) -> None:
         from ..embed import TEIClient, check_model
@@ -323,7 +328,7 @@ class RunScreen(Screen):
 
         try:
             corpora = st.selection.resolve(st.tree)
-            client = TEIClient(cfg.tei_url, timeout=cfg.tei_timeout)
+            client = TEIClient(cfg.tei_url, timeout=cfg.tei_timeout, api_key=cfg.tei_api_key)
             info = client.info()
             check_model(info, cfg.model, cfg.dims, client)
             say(f"embeddings: {info.model_id} at {cfg.tei_url}")
@@ -433,9 +438,9 @@ class SearchScreen(Screen):
         cfg = self.state.cfg
         try:
             with Store(cfg.database_url, cfg.schema, cfg.vector_type, cfg.dims) as store:
-                hits = search(store, TEIClient(cfg.tei_url, timeout=cfg.tei_timeout), q,
-                              query_prefix=cfg.query_prefix,
-                              top=20, countries=countries)
+                client = TEIClient(cfg.tei_url, timeout=cfg.tei_timeout, api_key=cfg.tei_api_key)
+                hits = search(store, client, q, query_prefix=cfg.query_prefix, top=20,
+                              countries=countries)
             self.post_message(self.Results(hits))
         except Exception as exc:  # noqa: BLE001
             self.post_message(self.Results([], error=str(exc)))

@@ -42,6 +42,8 @@ tree is found at `GLOBAL_LAW_PATH`, else at `./global-law` or `../global-law`.
 | Command | Does |
 | --- | --- |
 | `glv check` | Is the tree found, do the embeddings server and the database answer, and with which model. |
+
+All settings are environment variables, see `.env.example`: tree path, database URL, embeddings URL and optional API key, model, dimensions, chunk size, batch size, workers, timeout.
 | `glv list [--country X]` | Every corpus in the tree, marking the selected ones. |
 | `glv select --country X --corpus c/l/n --exclude … --all --clear --show` | Edit `selection.toml` and show its cost: files, bytes, estimated chunks and time. |
 | `glv index [--dry-run] [--country …] [--max-files N]` | Index the selection (or a one-off selection). Resumable: a rerun indexes only new, changed or deleted files. |
@@ -71,6 +73,32 @@ discover → select → plan → parse → chunk → embed (TEI) → store (pgve
 
 The index records model, dimensions, vector type and chunker version; `glv` refuses to write into
 an index built with other settings. Use `GLV_SCHEMA` to keep several indexes side by side.
+
+## Remote GPU
+
+Embedding is the only slow stage, and it is plain HTTP, so the embeddings server can run on a
+rented GPU while the files and the database stay local. On a 6-core CPU this model embeds about
+1.5 chunks/s (Malta: 12 h, the whole tree: a month); on one rented RTX 4090 or L4 it is a few
+hundred chunks/s, so the whole tree is a few hours and a few dollars.
+
+1. Start a GPU pod (RunPod, Vast.ai, …) with the TEI CUDA image for its card, for example
+   `ghcr.io/huggingface/text-embeddings-inference:89-latest` on an RTX 4090 (`86-latest` on
+   A10/A100/RTX 30xx, `1.9` for Hopper), the same `--model-id Snowflake/snowflake-arctic-embed-m-v2.0`,
+   `--max-client-batch-size 64`, and `--api-key <a secret>` so the public URL is not open.
+   Expose port 80 through the provider's HTTPS proxy. A Hugging Face Inference Endpoint running
+   this model works the same way with its bearer token.
+2. In `.env`:
+   ```sh
+   TEI_URL=https://<pod-id>-80.proxy.runpod.net   # or the endpoint URL
+   TEI_API_KEY=<the secret>
+   GLV_BATCH_SIZE=32      # fill the GPU; the per-request latency is now the network's
+   GLV_WORKERS=8
+   ```
+3. `glv check`, then `glv index`. The run resumes anything a CPU run already stored, because
+   the model, dimensions and index settings are the same.
+
+The whole tree sends about 5.5 GB of text up and receives about 14 GB of vectors; stop the pod
+when `glv status` shows every corpus indexed.
 
 ## Development
 

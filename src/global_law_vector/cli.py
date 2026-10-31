@@ -153,7 +153,7 @@ def _check_services(cfg: Config, need_tei: bool = True, need_db: bool = True) ->
     if need_tei:
         from .embed import TEIClient
 
-        if not TEIClient(cfg.tei_url, retries=0, timeout=5).health():
+        if not TEIClient(cfg.tei_url, retries=0, timeout=5, api_key=cfg.tei_api_key).health():
             problems.append(f"embeddings server not reachable at {cfg.tei_url} (TEI_URL)")
     if need_db:
         try:
@@ -189,13 +189,14 @@ def cmd_check(cfg: Config, args: argparse.Namespace) -> int:
           f"{'' if cfg.selection_file.is_file() else '  (not created yet)'}")
     from .embed import EmbeddingError, TEIClient
 
-    client = TEIClient(cfg.tei_url, retries=0, timeout=5)
+    client = TEIClient(cfg.tei_url, retries=0, timeout=5, api_key=cfg.tei_api_key)
     if client.health():
         info = client.info()
         dims = info.dims
         if dims is None:
             try:
-                dims = TEIClient(cfg.tei_url, retries=0, timeout=60).probe_dims()
+                probe = TEIClient(cfg.tei_url, retries=0, timeout=60, api_key=cfg.tei_api_key)
+                dims = probe.probe_dims()
             except EmbeddingError:
                 dims = None
         shown = dims or "busy, not measured"
@@ -255,7 +256,7 @@ def cmd_index(cfg: Config, args: argparse.Namespace) -> int:
 
     if _preflight(cfg):
         return 1
-    client = TEIClient(cfg.tei_url, timeout=cfg.tei_timeout)
+    client = TEIClient(cfg.tei_url, timeout=cfg.tei_timeout, api_key=cfg.tei_api_key)
     info = client.info()
     check_model(info, cfg.model, cfg.dims, client)
     store = _open_store(cfg)
@@ -338,7 +339,7 @@ def cmd_search(cfg: Config, args: argparse.Namespace) -> int:
         return 1
     store = _open_store(cfg)
     try:
-        client = TEIClient(cfg.tei_url, timeout=cfg.tei_timeout)
+        client = TEIClient(cfg.tei_url, timeout=cfg.tei_timeout, api_key=cfg.tei_api_key)
         hits = search(store, client, args.query, query_prefix=cfg.query_prefix,
                       top=args.top, countries=args.country or [], corpora=args.corpus or [])
     finally:

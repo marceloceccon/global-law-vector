@@ -23,7 +23,7 @@ def _services() -> Config | None:
     cfg = Config.from_env()
     cfg.global_law = FIXTURE_TREE
     cfg.schema = os.environ.get("GLV_TEST_SCHEMA", "glv_test")
-    if not TEIClient(cfg.tei_url, retries=0, timeout=3).health():
+    if not TEIClient(cfg.tei_url, retries=0, timeout=3, api_key=cfg.tei_api_key).health():
         return None
     try:
         import psycopg
@@ -46,7 +46,7 @@ def test_index_then_search(cfg, tree):
     from global_law_vector.embed import check_model
     from global_law_vector.store import Store
 
-    client = TEIClient(cfg.tei_url)
+    client = TEIClient(cfg.tei_url, api_key=cfg.tei_api_key)
     info = client.info()
     cfg.model = info.model_id or cfg.model
     cfg.dims = info.dims or client.probe_dims()

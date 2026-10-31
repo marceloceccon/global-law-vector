@@ -52,6 +52,7 @@ class Config:
     database_url: str = "postgresql://utility:utility@127.0.0.1:5432/utility"
     schema: str = "global_law"
     tei_url: str = "http://127.0.0.1:8080"
+    tei_api_key: str | None = None  # sent as "Authorization: Bearer …" when set
     model: str = DEFAULT_MODEL
     dims: int = DEFAULT_DIMS
     max_tokens: int = DEFAULT_MAX_TOKENS
@@ -76,6 +77,7 @@ class Config:
         cfg.database_url = env.get("DATABASE_URL", cfg.database_url)
         cfg.schema = env.get("GLV_SCHEMA", cfg.schema)
         cfg.tei_url = env.get("TEI_URL", cfg.tei_url).rstrip("/")
+        cfg.tei_api_key = env.get("TEI_API_KEY") or None
         cfg.model = env.get("GLV_MODEL", cfg.model)
         cfg.dims = int(env.get("GLV_DIMS", cfg.dims))
         cfg.max_tokens = int(env.get("GLV_MAX_TOKENS", cfg.max_tokens))

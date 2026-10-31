@@ -34,7 +34,16 @@ class _Stub(BaseHTTPRequestHandler):
         self.send_response(404)
         self.end_headers()
 
+    seen_auth = None
+    reject_auth = False
+
     def do_POST(self):
+        _Stub.seen_auth = self.headers.get("Authorization")
+        if _Stub.reject_auth:
+            self.send_response(401)
+            self.end_headers()
+            self.wfile.write(b"unauthorised")
+            return
         n = int(self.headers.get("Content-Length", 0))
         payload = json.loads(self.rfile.read(n))
         if _Stub.fail_next > 0:
@@ -116,3 +125,22 @@ def test_unreachable_server_raises_quickly():
 
 def test_vector_literal():
     assert vector_literal([1, 0.5, -0.1234567891]) == "[1,0.5,-0.1234568]"
+
+
+def test_api_key_is_sent_as_bearer(server):
+    _Stub.seen_auth = None
+    c = TEIClient(server, api_key="secret-key")
+    c.embed(["x"])
+    assert _Stub.seen_auth == "Bearer secret-key"
+    _Stub.seen_auth = None
+    TEIClient(server).embed(["x"])
+    assert _Stub.seen_auth is None
+
+
+def test_unauthorised_is_not_retried(server):
+    _Stub.reject_auth = True
+    try:
+        with pytest.raises(EmbeddingError, match="TEI_API_KEY"):
+            TEIClient(server, retries=3).embed(["x"])
+    finally:
+        _Stub.reject_auth = False
