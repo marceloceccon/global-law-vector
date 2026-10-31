@@ -66,7 +66,7 @@ class Config:
     tokenizer_path: Path | None = None
     selection_file: Path = Path("selection.toml")
     cache_dir: Path = Path.home() / ".cache" / "global-law-vector"
-    chunks_per_second: float = 40.0  # a first guess; replaced by the measured figure
+    chunks_per_second: float = 1.5  # measured on a 6-core CPU; replaced by the stored figure
 
     @classmethod
     def from_env(cls, dotenv: Path | None = None) -> Config:

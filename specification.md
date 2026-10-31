@@ -329,11 +329,16 @@ with its heading path, which is what a search result should land on.
 
 ### 8.3 Throughput
 
-- A medium model (about 300 M parameters) on CPU through TEI runs on the order of 20–60 chunks/s,
-  several times slower than the small model first considered. The whole tree is therefore a
-  one-to-three-day job and Brazil national a few hours. The cost estimate in the TUI and in
-  `glv select --show` uses a chunks-per-second figure measured on the first run and stored in
-  `index_meta`.
+- Measured 2026-10-31 on the host (Intel i7-8700K, 6 cores, no GPU, TEI `cpu-latest`): about
+  **1.5 chunks/s** for Malta's provisions (roughly 500 tokens each), i.e. ~750 tokens/s. The
+  server's own metrics show it is CPU-bound; more client concurrency only lengthens its queue.
+  At that rate Malta (66,864 files) is ~12 hours, Brazil national (14,809) ~3 hours, and the
+  whole tree (4.5 M files) about 35 days: the full tree needs a GPU or a smaller model.
+- Client settings that match a CPU server: 16 chunks per request, 2 concurrent requests, a
+  600 s timeout. A request the client abandons is still computed by the server, so timeouts
+  must be long, not short.
+- The cost estimate in the TUI and in `glv select --show` uses a chunks-per-second figure
+  measured on the first run and stored in `index_meta` (1.5 until then).
 - Load first, build HNSW once, with `maintenance_work_mem` raised for the build. Re-indexing a
   changed corpus updates rows under the existing index.
 - A rerun compares corpus SHA and file hashes and touches only new, changed or deleted files.
@@ -346,6 +351,10 @@ with its heading path, which is what a search result should land on.
    the US federal code, to validate quality across languages before any multi-hour run.
 3. **Vector type.** Proposed and written into the schema: `halfvec(768)`; `vector(768)` is a
    config switch.
+6. **Hardware for the full tree.** At 1.5 chunks/s on CPU the whole tree is a month of
+   embedding. Options: a GPU for the TEI container, a smaller multilingual model (at the cost of
+   quality), or accepting that the index covers a selection, which is what the tool is built
+   for.
 4. **In-force date per document in v1.** Costs one `git log` per file. Proposed: off by default,
    `--with-dates` flag.
 5. **Chunk target size.** Proposed 1,024 tokens (section 8.2); to be checked against search
