@@ -79,3 +79,30 @@ def test_heuristic_tokenizer_monotone():
     assert t.count("") == 0
     assert t.count("one two three") < t.count("one two three four five six")
     assert t.count("日本の法律") > t.count("law")
+
+
+def test_tokenizer_cache_round_trip(tmp_path, monkeypatch):
+    """A tokenizer fetched once is saved under the cache dir and loaded from there next time."""
+    pytest = __import__("pytest")
+    tokenizers = pytest.importorskip("tokenizers")
+    from tokenizers import models, pre_tokenizers
+
+    from global_law_vector import tokenizer as mod
+    from global_law_vector.tokenizer import HFTokenizer, cached_tokenizer_path, load_tokenizer
+
+    fake = tokenizers.Tokenizer(models.WordLevel({"a": 0, "b": 1, "[UNK]": 2}, unk_token="[UNK]"))
+    fake.pre_tokenizer = pre_tokenizers.Whitespace()
+    calls = []
+
+    def from_hub(cls, model):
+        calls.append(model)
+        return cls(fake, model)
+
+    monkeypatch.setattr(HFTokenizer, "from_hub", classmethod(from_hub))
+    t1 = load_tokenizer("org/model", cache_dir=tmp_path)
+    assert calls == ["org/model"] and t1.count("a b a") == 3
+    assert cached_tokenizer_path(tmp_path, "org/model").is_file()
+    t2 = load_tokenizer("org/model", cache_dir=tmp_path)
+    assert calls == ["org/model"]  # no second fetch
+    assert t2.name.startswith("file:") and t2.count("a b a") == 3
+    assert mod.HeuristicTokenizer().name == "heuristic"

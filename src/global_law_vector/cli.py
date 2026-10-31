@@ -187,13 +187,23 @@ def cmd_check(cfg: Config, args: argparse.Namespace) -> int:
         ok = False
     print(f"selection file    {cfg.selection_file}"
           f"{'' if cfg.selection_file.is_file() else '  (not created yet)'}")
-    from .embed import TEIClient
+    from .embed import EmbeddingError, TEIClient
 
     client = TEIClient(cfg.tei_url, retries=0, timeout=5)
     if client.health():
         info = client.info()
-        print(f"embeddings        {cfg.tei_url}  {info.model_id} dims={info.dims} "
+        dims = info.dims
+        if dims is None:
+            try:
+                dims = TEIClient(cfg.tei_url, retries=0, timeout=60).probe_dims()
+            except EmbeddingError:
+                dims = None
+        shown = dims or "busy, not measured"
+        print(f"embeddings        {cfg.tei_url}  {info.model_id} dims={shown} "
               f"max_tokens={info.max_input_length}")
+        if dims and dims != cfg.dims:
+            print(f"                  WARNING: GLV_DIMS is {cfg.dims}")
+            ok = False
         if info.model_id and info.model_id != cfg.model:
             print(f"                  WARNING: GLV_MODEL is {cfg.model}")
             ok = False
@@ -227,7 +237,8 @@ def cmd_index(cfg: Config, args: argparse.Namespace) -> int:
     if not corpora:
         print("selection is empty; nothing to index", file=sys.stderr)
         return 1
-    tok = load_tokenizer(cfg.model, cfg.tokenizer_path, allow_network=not args.offline)
+    tok = load_tokenizer(cfg.model, cfg.tokenizer_path, allow_network=not args.offline,
+                         cache_dir=cfg.cache_dir)
     max_files = sel.max_files_per_corpus
 
     if args.dry_run:
@@ -244,9 +255,9 @@ def cmd_index(cfg: Config, args: argparse.Namespace) -> int:
 
     if _preflight(cfg):
         return 1
-    client = TEIClient(cfg.tei_url)
+    client = TEIClient(cfg.tei_url, timeout=cfg.tei_timeout)
     info = client.info()
-    check_model(info, cfg.model, cfg.dims)
+    check_model(info, cfg.model, cfg.dims, client)
     store = _open_store(cfg)
     try:
         store.migrate()
@@ -327,7 +338,8 @@ def cmd_search(cfg: Config, args: argparse.Namespace) -> int:
         return 1
     store = _open_store(cfg)
     try:
-        hits = search(store, TEIClient(cfg.tei_url), args.query, query_prefix=cfg.query_prefix,
+        client = TEIClient(cfg.tei_url, timeout=cfg.tei_timeout)
+        hits = search(store, client, args.query, query_prefix=cfg.query_prefix,
                       top=args.top, countries=args.country or [], corpora=args.corpus or [])
     finally:
         store.close()

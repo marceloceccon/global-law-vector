@@ -72,6 +72,11 @@ def test_info_and_health(server):
         check_model(info, "other/model", 3)
     with pytest.raises(EmbeddingError):
         check_model(info, "stub/model", 768)
+    info.dims = None  # /info without a width: measured through the client
+    assert c.probe_dims() == 3
+    check_model(info, "stub/model", 3, c)
+    with pytest.raises(EmbeddingError):
+        check_model(info, "stub/model", 4, c)
 
 
 def test_embed_many_keeps_order_and_batches(server):

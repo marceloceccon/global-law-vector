@@ -323,11 +323,11 @@ class RunScreen(Screen):
 
         try:
             corpora = st.selection.resolve(st.tree)
-            client = TEIClient(cfg.tei_url)
+            client = TEIClient(cfg.tei_url, timeout=cfg.tei_timeout)
             info = client.info()
-            check_model(info, cfg.model, cfg.dims)
+            check_model(info, cfg.model, cfg.dims, client)
             say(f"embeddings: {info.model_id} at {cfg.tei_url}")
-            tok = load_tokenizer(cfg.model, cfg.tokenizer_path)
+            tok = load_tokenizer(cfg.model, cfg.tokenizer_path, cache_dir=cfg.cache_dir)
             say(f"tokenizer: {tok.name}")
             with Store(cfg.database_url, cfg.schema, cfg.vector_type, cfg.dims) as store:
                 store.migrate()
@@ -433,7 +433,8 @@ class SearchScreen(Screen):
         cfg = self.state.cfg
         try:
             with Store(cfg.database_url, cfg.schema, cfg.vector_type, cfg.dims) as store:
-                hits = search(store, TEIClient(cfg.tei_url), q, query_prefix=cfg.query_prefix,
+                hits = search(store, TEIClient(cfg.tei_url, timeout=cfg.tei_timeout), q,
+                              query_prefix=cfg.query_prefix,
                               top=20, countries=countries)
             self.post_message(self.Results(hits))
         except Exception as exc:  # noqa: BLE001

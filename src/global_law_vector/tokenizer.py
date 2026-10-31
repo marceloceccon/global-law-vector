@@ -59,8 +59,25 @@ class HFTokenizer:
         return cls(_T.from_pretrained(model), model)
 
 
-def load_tokenizer(model: str, path: Path | None = None, allow_network: bool = True) -> Tokenizer:
-    """The model's tokenizer when available, else the heuristic (with a warning)."""
+def cached_tokenizer_path(cache_dir: Path, model: str) -> Path:
+    return Path(cache_dir) / f"tokenizer-{model.replace('/', '--')}.json"
+
+
+def load_tokenizer(
+    model: str,
+    path: Path | None = None,
+    allow_network: bool = True,
+    cache_dir: Path | None = None,
+) -> Tokenizer:
+    """The model's tokenizer when available, else the heuristic (with a warning).
+
+    Order: an explicit file, then a copy cached under `cache_dir` from an earlier run, then the
+    hub (saving the copy, so later runs make no network request), then the heuristic.
+    """
+    if path is None and cache_dir is not None:
+        cached = cached_tokenizer_path(cache_dir, model)
+        if cached.is_file():
+            path = cached
     if path is not None:
         try:
             return HFTokenizer.from_file(path)
@@ -69,7 +86,14 @@ def load_tokenizer(model: str, path: Path | None = None, allow_network: bool = T
             return HeuristicTokenizer()
     if allow_network:
         try:
-            return HFTokenizer.from_hub(model)
+            tok = HFTokenizer.from_hub(model)
+            if cache_dir is not None:
+                try:
+                    Path(cache_dir).mkdir(parents=True, exist_ok=True)
+                    tok._tok.save(str(cached_tokenizer_path(cache_dir, model)))
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("could not cache the tokenizer: %s", exc)
+            return tok
         except ImportError:
             log.warning("`tokenizers` not installed; token counts are heuristic")
         except Exception as exc:  # noqa: BLE001

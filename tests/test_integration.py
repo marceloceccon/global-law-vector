@@ -48,9 +48,9 @@ def test_index_then_search(cfg, tree):
 
     client = TEIClient(cfg.tei_url)
     info = client.info()
-    cfg.dims = info.dims or cfg.dims
     cfg.model = info.model_id or cfg.model
-    check_model(info, cfg.model, cfg.dims)
+    cfg.dims = info.dims or client.probe_dims()
+    check_model(info, cfg.model, cfg.dims, client)
     store = Store(cfg.database_url, cfg.schema, cfg.vector_type, cfg.dims)
     try:
         store.reset()

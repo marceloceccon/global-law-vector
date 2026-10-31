@@ -60,8 +60,9 @@ class Config:
     vector_type: str = "halfvec"  # or "vector"
     chunk_tokens: int = 1024
     chunk_overlap: int = 0
-    batch_size: int = 32
-    workers: int = 4
+    batch_size: int = 16  # TEI's default --max-client-batch-size is 32
+    workers: int = 2
+    tei_timeout: float = 600.0  # a CPU server can take minutes per batch
     tokenizer_path: Path | None = None
     selection_file: Path = Path("selection.toml")
     cache_dir: Path = Path.home() / ".cache" / "global-law-vector"
@@ -85,6 +86,7 @@ class Config:
         cfg.chunk_overlap = int(env.get("GLV_CHUNK_OVERLAP", cfg.chunk_overlap))
         cfg.batch_size = int(env.get("GLV_BATCH_SIZE", cfg.batch_size))
         cfg.workers = int(env.get("GLV_WORKERS", cfg.workers))
+        cfg.tei_timeout = float(env.get("GLV_TEI_TIMEOUT", cfg.tei_timeout))
         if env.get("GLV_TOKENIZER"):
             cfg.tokenizer_path = Path(env["GLV_TOKENIZER"]).expanduser()
         cfg.selection_file = Path(env.get("GLV_SELECTION", str(cfg.selection_file)))

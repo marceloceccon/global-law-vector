@@ -61,7 +61,13 @@ class TEIClient:
                 last = exc
                 if attempt >= self.retries:
                     break
-                log.warning("TEI %s unreachable (%s), retrying in %.0fs", path, exc, delay)
+                if "timed out" in str(exc).lower() or isinstance(exc, TimeoutError):
+                    log.warning(
+                        "TEI %s gave no answer within %.0fs (the server may still be"
+                        " computing it); retrying in %.0fs. Raise GLV_TEI_TIMEOUT or lower"
+                        " GLV_BATCH_SIZE / GLV_WORKERS if this repeats", path, self.timeout, delay)
+                else:
+                    log.warning("TEI %s unreachable (%s), retrying in %.0fs", path, exc, delay)
             time.sleep(delay)
             delay = min(delay * 2, 30.0)
         raise EmbeddingError(f"TEI {path} failed after {self.retries} retries: {last}")
@@ -87,6 +93,10 @@ class TEIClient:
             raw=raw,
         )
 
+    def probe_dims(self) -> int:
+        """The vector width, measured: TEI's /info does not report it."""
+        return len(self.embed(["query: dimension probe"])[0])
+
     def embed(self, texts: Sequence[str], truncate: bool = True) -> list[list[float]]:
         if not texts:
             return []
@@ -107,14 +117,21 @@ class TEIClient:
         return [v for b in results for v in b]
 
 
-def check_model(info: ModelInfo, expected_model: str, expected_dims: int) -> None:
-    """Refuse to proceed when the server's model is not the configured one (premise P5)."""
+def check_model(info: ModelInfo, expected_model: str, expected_dims: int,
+                client: TEIClient | None = None) -> None:
+    """Refuse to proceed when the server's model is not the configured one (premise P5).
+
+    When `/info` does not state the width and a client is given, one embedding is measured.
+    """
     if info.model_id and info.model_id != expected_model:
         raise EmbeddingError(
             f"embeddings server serves {info.model_id!r} but GLV_MODEL is {expected_model!r}"
         )
-    if info.dims and info.dims != expected_dims:
-        raise EmbeddingError(f"server embeds {info.dims} dims but GLV_DIMS is {expected_dims}")
+    dims = info.dims
+    if dims is None and client is not None:
+        dims = client.probe_dims()
+    if dims and dims != expected_dims:
+        raise EmbeddingError(f"server embeds {dims} dims but GLV_DIMS is {expected_dims}")
 
 
 def vector_literal(values: Iterable[float]) -> str:
