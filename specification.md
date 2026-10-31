@@ -1,6 +1,6 @@
 # global-law-vector — Specification
 
-Version 0.1, 2026-10-31. Status: specification. No application code yet.
+Version 0.2, 2026-10-31. Status: in development; milestones M1 and M2 implemented, M3 started.
 
 ## 1. Core concept
 
@@ -15,7 +15,7 @@ text, vectors and metadata in PostgreSQL with pgvector. The result is a semantic
 
 Two things make it different from "embed a folder":
 
-1. **Selection is a first-class feature.** The tree holds 4.5 million files in 107 corpora. Nobody
+1. **Selection is a first-class feature.** The tree holds 4.5 million files in 525 corpora. Nobody
    indexes all of it on the first day. Choosing countries and corpora must be trivial: a selection
    file, CLI flags, or an interactive terminal UI that shows what each choice costs.
 2. **The index knows where it came from.** Every chunk is traceable to a corpus, a commit, a file
@@ -25,7 +25,8 @@ Two things make it different from "embed a folder":
 
 P1. **Read-only source.** The utility never writes inside `global-law`, never runs `git checkout`
     there, and never relies on the root repository's commit hashes (they change on every rebuild).
-    It relies on `manifest.json`, `jurisdiction.json`, each corpus's pinned commit, and the files.
+    It relies on the submodules pinned in the root tree (`git ls-tree`), `manifest.json` as
+    metadata, each corpus's pinned commit, and the files.
 
 P2. **The law in force on the build date is version 1.** Each corpus is indexed at its pinned
     HEAD. Historical versions (the law on past dates) are designed for, not built: the schema
@@ -117,7 +118,8 @@ selection in hours.
 | Fact | Value |
 | --- | --- |
 | Jurisdictions in `jurisdiction.json` | 211 |
-| Corpora pinned as submodules (`manifest.json`) | 107 |
+| Corpora pinned as submodules (root tree gitlinks) | 525 |
+| Corpora described in `manifest.json` | 107 |
 | Markdown files (excluding `.git`) | 4,545,302 |
 | Total markdown bytes | ~5.5 GB (tree is 21 GB with git objects) |
 | Mean file size | ~1.2 KB, roughly 300 tokens |
@@ -230,8 +232,10 @@ global-law-vector/
     └── test_integration.py   needs the Docker services; skipped otherwise
 ```
 
-Dependencies: `psycopg[binary]`, `httpx`, `pyyaml`, `tomli` (3.10 compat) or stdlib `tomllib`,
-a tokenizer (`tokenizers`), `typer` for the CLI, `textual` for the TUI. No ML frameworks.
+Dependencies: `psycopg[binary]` only. The HTTP client is `urllib`, TOML is `tomllib`, the front
+matter parser is forty lines (the corpora use flat `key: value` YAML), the CLI is `argparse`.
+Optional: `tokenizers` for exact counts (else a heuristic), `textual` for the TUI. No ML
+frameworks.
 
 ## 7. Storage schema (pgvector)
 
@@ -249,7 +253,8 @@ CREATE TABLE global_law.corpus (
   commit_sha    text NOT NULL,               -- pinned submodule commit at index time
   record_to     date,
   file_count    int,
-  indexed_at    timestamptz NOT NULL
+  indexed_at    timestamptz NOT NULL,       -- last touched
+  completed_at  timestamptz                  -- NULL while a run is in progress ("partial")
 );
 
 CREATE TABLE global_law.document (

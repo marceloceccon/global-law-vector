@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "global-law-vector"
+version = "0.1.0"
+description = "Vectorised semantic search over the global-law tree with pgvector"
+readme = "README.md"
+license = "CC0-1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "psycopg[binary]>=3.1",
+]
+
+[project.optional-dependencies]
+tokenizer = ["tokenizers>=0.15"]
+tui = ["textual>=0.50"]
+dev = ["pytest>=8", "ruff>=0.4", "tokenizers>=0.15", "textual>=0.50"]
+
+[project.scripts]
+glv = "global_law_vector.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+global_law_vector = ["sql/*.sql"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

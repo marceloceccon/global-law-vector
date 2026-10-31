@@ -1,0 +1,15 @@
+{
+  "title": "fixture subset of Git for Global Law",
+  "corpora": [
+    {"path": "brazil/national/acts", "name": "Brazil", "label": "Brazil", "language": "",
+     "code": "BR", "record_to": "2026-10-28"},
+    {"path": "czechia/national/acts", "name": "Czechia", "label": "Czechia", "language": "cs",
+     "code": "CZ", "coverage": "whole statute book", "record_to": "2026-10-29"},
+    {"path": "germany/bund/acts", "name": "Germany", "label": "Germany", "language": "de",
+     "code": "DE", "record_to": "2026-10-29"},
+    {"path": "malta/national/acts", "name": "Malta", "label": "Malta", "language": "en",
+     "code": "MT", "record_to": "2026-10-29"},
+    {"path": "united-states/federal/usc", "name": "United States", "label": "United States",
+     "language": "en", "code": "US", "record_to": "2026-10-29"}
+  ]
+}

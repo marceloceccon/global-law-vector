@@ -1,0 +1,12 @@
+# global-law-vector selection. Copy to selection.toml, or let `glv select` / `glv tui` write it.
+[include]
+all = false
+countries = ["malta", "germany"]
+corpora = ["brazil/national/acts", "united-states/federal/usc"]
+
+[exclude]
+countries = []
+corpora = []
+
+[limits]
+max_files_per_corpus = 0

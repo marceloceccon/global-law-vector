@@ -1,0 +1,24 @@
+[submodule "brazil/national/acts"]
+	path = brazil/national/acts
+	url = https://github.com/lexifina/brazil-law.git
+[submodule "brazil/sao-paulo/acts"]
+	path = brazil/sao-paulo/acts
+	url = https://github.com/lexifina/brazil-sao-paulo-law.git
+[submodule "czechia/national/acts"]
+	path = czechia/national/acts
+	url = https://github.com/lexifina/czechia-law.git
+[submodule "germany/bund/acts"]
+	path = germany/bund/acts
+	url = https://github.com/lexifina/germany-law.git
+[submodule "malta/national/acts"]
+	path = malta/national/acts
+	url = https://github.com/lexifina/malta-law.git
+[submodule "united-states/california/statutes"]
+	path = united-states/california/statutes
+	url = https://github.com/lexifina/us-california-law.git
+[submodule "united-states/federal/usc"]
+	path = united-states/federal/usc
+	url = https://github.com/lexifina/us-law.git
+[submodule "nauru/national/acts"]
+	path = nauru/national/acts
+	url = https://github.com/lexifina/nauru-law.git
