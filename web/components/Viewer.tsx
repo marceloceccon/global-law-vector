@@ -1,8 +1,8 @@
 "use client";
 
 /**
- * Client shell: fetches the sample once, owns the country toggles and the colour mode, and
- * hands them to the canvas and the overlay. The canvas is loaded client-side only.
+ * Client shell: fetches the sample once, owns the country and domain toggles and the colour
+ * mode, and hands them to the canvas and the overlay. The canvas is loaded client-side only.
  */
 import dynamic from "next/dynamic";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -18,6 +18,7 @@ export default function Viewer() {
   const [data, setData] = useState<PointsPayload | null>(null);
   const [status, setStatus] = useState<Status>({ kind: "loading" });
   const [enabled, setEnabled] = useState<ReadonlySet<string>>(new Set());
+  const [domains, setDomains] = useState<ReadonlySet<string>>(new Set());
   const [mode, setMode] = useState<ColorMode>("country");
 
   useEffect(() => {
@@ -30,6 +31,7 @@ export default function Viewer() {
         const payload = body as PointsPayload;
         setData(payload);
         setEnabled(new Set(payload.countries.map((c) => c.name)));
+        setDomains(new Set(payload.domains.map((d) => d.id)));
         setStatus({ kind: "ready" });
       } catch (err) {
         if (ctl.signal.aborted) return;
@@ -51,15 +53,30 @@ export default function Viewer() {
     (on: boolean) => setEnabled(new Set(on && data ? data.countries.map((c) => c.name) : [])),
     [data],
   );
+  const toggleDomain = useCallback((id: string) => {
+    setDomains((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+  const setAllDomains = useCallback(
+    (on: boolean) => setDomains(new Set(on && data ? data.domains.map((d) => d.id) : [])),
+    [data],
+  );
 
   // Per-point visibility, recomputed only when a toggle changes: the geometry stays put.
+  // The domain filter applies only while colouring by domain, where its checkboxes are shown,
+  // so what is on screen is always explained by the controls on screen.
   const visible = useMemo(() => {
     if (!data) return null;
     const on = data.countries.map((c) => enabled.has(c.name));
+    const onDomain = data.domains.map((d) => mode !== "domain" || domains.has(d.id));
     const mask = new Uint8Array(data.sample);
-    for (let i = 0; i < data.sample; i++) mask[i] = on[data.country[i]] ? 1 : 0;
+    for (let i = 0; i < data.sample; i++) mask[i] = on[data.country[i]] && onDomain[data.domain[i]] ? 1 : 0;
     return mask;
-  }, [data, enabled]);
+  }, [data, enabled, domains, mode]);
 
   return (
     <>
@@ -83,9 +100,12 @@ export default function Viewer() {
           data={data}
           visible={visible}
           enabled={enabled}
+          domains={domains}
           mode={mode}
           onToggle={toggle}
           onAll={setAll}
+          onToggleDomain={toggleDomain}
+          onAllDomains={setAllDomains}
           onMode={setMode}
         />
       )}

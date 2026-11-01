@@ -1,6 +1,6 @@
 "use client";
 
-/** The control panel: colour mode, country toggles, legend, counts, technical caption. */
+/** The control panel: colour mode, country and domain toggles, counts, technical caption. */
 import { useMemo } from "react";
 import type { PointsPayload } from "@/lib/points";
 import type { ColorMode } from "./PointCloud";
@@ -12,17 +12,23 @@ export default function Overlay({
   data,
   visible,
   enabled,
+  domains,
   mode,
   onToggle,
   onAll,
+  onToggleDomain,
+  onAllDomains,
   onMode,
 }: {
   data: PointsPayload;
   visible: Uint8Array;
   enabled: ReadonlySet<string>;
+  domains: ReadonlySet<string>;
   mode: ColorMode;
   onToggle: (country: string) => void;
   onAll: (on: boolean) => void;
+  onToggleDomain: (id: string) => void;
+  onAllDomains: (on: boolean) => void;
   onMode: (mode: ColorMode) => void;
 }) {
   const { shown, perCountry, perDomain } = useMemo(() => {
@@ -38,6 +44,7 @@ export default function Overlay({
     return { shown, perCountry, perDomain };
   }, [data, visible]);
   const shownCountries = data.countries.filter((c) => enabled.has(c.name)).length;
+  const shownDomains = data.domains.filter((d) => domains.has(d.id)).length;
 
   const p = data.projection;
   const caption =
@@ -54,6 +61,11 @@ export default function Overlay({
       <p className="sub">
         showing <span className="count">{fmt(shown)}</span> points from{" "}
         <span className="count">{shownCountries}</span> {shownCountries === 1 ? "country" : "countries"}
+        {mode === "domain" && shownDomains < data.domains.length && (
+          <>
+            , <span className="count">{shownDomains}</span> of {data.domains.length} domains
+          </>
+        )}
         <br />
         sample of {fmt(data.sample)} from {fmt(data.totalChunks)} indexed chunks
       </p>
@@ -97,16 +109,27 @@ export default function Overlay({
 
       {mode === "domain" && (
         <section>
-          <h2>nearest of eight domains</h2>
-          <ul className="legend">
-            {data.domains.map((d, i) => (
-              <li key={d.id}>
-                <span className="swatch" style={{ "--c": d.color } as React.CSSProperties} />
-                {d.label}
-                <span className="n">{fmt(perDomain[i])}</span>
-              </li>
-            ))}
-          </ul>
+          <h2>
+            nearest of eight domains
+            <span className="links">
+              <button type="button" onClick={() => onAllDomains(true)}>all</button>
+              <button type="button" onClick={() => onAllDomains(false)}>none</button>
+            </span>
+          </h2>
+          {data.domains.map((d, i) => (
+            <button
+              key={d.id}
+              type="button"
+              className="toggle"
+              aria-pressed={domains.has(d.id)}
+              onClick={() => onToggleDomain(d.id)}
+            >
+              <span className="box" />
+              <span className="swatch" style={{ "--c": d.color } as React.CSSProperties} />
+              {d.label}
+              <span className="n">{fmt(perDomain[i])}</span>
+            </button>
+          ))}
           <p className="foot">
             Domain = highest z-scored cosine similarity to eight domain{" "}
             {data.domainSource === "tei" ? "phrases embedded with the index model" : "keyword centroids"};

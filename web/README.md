@@ -28,25 +28,22 @@ The app reads the same settings as the Python side, in this order: the process e
 
 ## Serving it to the network
 
-The compose file in `../global-law-utility` has a `web` service that builds this directory
-into a self-contained image, joins the `utility` network (so `utility-pgvector` and
-`utility-embeddings` resolve) and publishes port 3000 on every interface of the host:
+A production build bound to every interface is enough; the app is read-only against the
+database and holds no secrets. The build is `standalone`, so the server is a single file
+that only needs the static assets copied beside it:
 
 ```sh
-cd ../global-law-utility
-docker compose up -d --build web
+npm run build
+cp -r .next/static .next/standalone/.next/static
+HOSTNAME=0.0.0.0 PORT=3000 node .next/standalone/server.js
 # then, from any machine on the LAN: http://<host-ip>:3000
 ```
 
-Rebuild with the same command after changing the code. Without Docker, a production build
-bound to all interfaces does the same job:
-
-```sh
-npm run build && HOSTNAME=0.0.0.0 PORT=3000 npm start
-```
-
-The image is read-only against the database and holds no secrets; `DATABASE_URL` and
-`TEI_URL` come from the compose `environment` block.
+From inside a devcontainer, publish the port from the container to the host (this setup maps
+host port 4000 to 3000 inside); the server finds the repository `.env` by walking up from its
+own directory. To rebuild, stop the old server first (`fuser -k 3000/tcp`), or the browser
+keeps getting the stale build. `web/Dockerfile` packages the same build as an image if one is
+wanted.
 
 ## How it works
 
@@ -80,13 +77,15 @@ second or two with the UMAP file, about ten seconds on the PCA fallback.
    keyword centroids from the sample stand in; cosine similarity to the eight vectors is
    computed in SQL and z-scored over the sample, the best wins, and the margin to the runner-up
    fades uncertain points towards neutral. Both colours travel to the GPU as vertex attributes,
-   so switching is instant.
+   so switching is instant. In domain mode the legend doubles as a filter: each domain has a
+   checkbox, so a single domain (or any subset) can be isolated across the enabled countries.
+   The domain filter applies only while colouring by domain, where its controls are visible.
 4. **Render.** Two additive layers from one `BufferGeometry`: small soft discs, and a wide
    faint halo whose strength follows local density (measured in the browser by
    `lib/spatial.ts`, a uniform-grid pass that takes well under a second). Blending is modest
    enough that dense regions brighten without turning white. A faint cube at the
-   normalisation extent gives orientation while orbiting. Country toggles rewrite a per-vertex
-   visibility attribute; nothing is re-fetched. OrbitControls with slow auto-rotate; no
+   normalisation extent gives orientation while orbiting. Country and domain toggles rewrite a
+   per-vertex visibility attribute; nothing is re-fetched. OrbitControls with slow auto-rotate; no
    picking, no post-processing.
 
    Tuning knobs are the `size` and `alpha` props of the two layers near the bottom of
