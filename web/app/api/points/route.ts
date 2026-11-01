@@ -12,7 +12,7 @@ export const runtime = "nodejs";
 
 export async function GET(req: NextRequest) {
   const e = env();
-  const n = Math.min(Math.max(Number(req.nextUrl.searchParams.get("n")) || e.points, 500), 20000);
+  const n = Math.min(Math.max(Number(req.nextUrl.searchParams.get("n")) || e.points, 500), 60000);
   const refresh = req.nextUrl.searchParams.get("refresh") === "1";
   try {
     const payload = await getPoints(n, refresh);

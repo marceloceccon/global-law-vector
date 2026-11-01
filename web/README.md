@@ -66,10 +66,19 @@ of the page is static.
    up to 300 chunks mentioning each domain's keywords stands in. Cosine similarity to the eight
    vectors is computed in SQL, the best wins, and the margin to the runner-up (as a percentile)
    fades uncertain points towards neutral. The legend says which source was used.
-4. **Render.** One `BufferGeometry` drawn twice with an additive soft-disc shader: a bright
-   core and a wide faint halo, so density alone produces brightness and depth. Country toggles
-   rewrite a per-vertex visibility attribute; nothing is re-fetched. OrbitControls with
-   auto-rotate; no picking.
+4. **Render.** In the browser, `lib/spatial.ts` puts the projected points in a uniform grid
+   and measures each point's local density and two nearest neighbours (under a second for
+   40,000 points). Four additive layers follow from that: small cores that whiten and twinkle
+   where the cloud is dense, wide faint halos that strengthen with density, a Gaussian-jittered
+   dust ghost per point that spreads wider where the cloud is thin, and 1-px filaments between
+   neighbours. A bloom pass (`@react-three/postprocessing`) blurs whatever exceeds the luminance
+   threshold, which with additive blending is the cluster cores. CSS light shafts sit on top
+   with screen blending. Country toggles rewrite per-vertex visibility attributes on all
+   layers; nothing is re-fetched. OrbitControls with auto-rotate; no picking.
+
+   Tuning knobs are the `size`, `alpha`, `gain` props of the layers at the bottom of
+   `components/PointCloud.tsx`, the `Bloom` props beside them, and `GLV_WEB_POINTS`
+   (40,000 by default; 60,000 is the cap, and a laptop GPU is happier at 20,000).
 
 The palette is the dark-mode categorical set of the dataviz reference palette, validated for
 colour-vision deficiency against the page background.

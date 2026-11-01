@@ -62,6 +62,9 @@ export default function Viewer() {
   return (
     <>
       <div className="stage">{data && visible && <PointCloud data={data} visible={visible} />}</div>
+      <div className="shafts" aria-hidden="true">
+        <span /><span /><span /><span /><span />
+      </div>
       {status.kind === "loading" && (
         <div className="notice">
           <div className="pulse">sampling the index and fitting the projection…</div>

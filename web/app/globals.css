@@ -35,6 +35,41 @@ body {
   display: block;
 }
 
+/* Light shafts: a few blurred, slowly breathing wedges falling from the top, blended with
+   screen so they only brighten. Pure CSS, no cost on the GPU scene. */
+.shafts {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+  mix-blend-mode: screen;
+}
+.shafts span {
+  position: absolute;
+  top: -20vh;
+  left: 50%;
+  width: var(--w);
+  height: 130vh;
+  margin-left: calc(var(--w) / -2);
+  transform-origin: 50% 0;
+  transform: translateX(var(--x)) rotate(var(--a));
+  background: linear-gradient(to bottom, rgba(214, 226, 255, var(--o)) 0%, rgba(214, 226, 255, 0) 75%);
+  filter: blur(18px);
+  animation: breathe var(--t) ease-in-out infinite alternate;
+}
+.shafts span:nth-child(1) { --w: 9vw;  --x: -4vw;  --a: -6deg;  --o: 0.16; --t: 11s; }
+.shafts span:nth-child(2) { --w: 5vw;  --x: 6vw;   --a: -2deg;  --o: 0.22; --t: 9s;  animation-delay: -3s; }
+.shafts span:nth-child(3) { --w: 14vw; --x: 14vw;  --a: 5deg;   --o: 0.10; --t: 14s; animation-delay: -6s; }
+.shafts span:nth-child(4) { --w: 4vw;  --x: -14vw; --a: -11deg; --o: 0.18; --t: 12s; animation-delay: -8s; }
+.shafts span:nth-child(5) { --w: 22vw; --x: 2vw;   --a: 1deg;   --o: 0.07; --t: 17s; animation-delay: -2s; }
+@keyframes breathe {
+  from { opacity: 0.55; }
+  to   { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .shafts span { animation: none; }
+}
+
 /* Overlay ------------------------------------------------------------------ */
 .panel {
   position: fixed;

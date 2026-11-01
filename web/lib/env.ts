@@ -70,7 +70,7 @@ export function env(): Env {
     teiUrl: get("TEI_URL", "http://127.0.0.1:8080").replace(/\/+$/, ""),
     teiApiKey: get("TEI_API_KEY"),
     queryPrefix: get("GLV_QUERY_PREFIX", "query: "),
-    points: Math.min(Math.max(Number(get("GLV_WEB_POINTS", "12000")), 500), 20000),
+    points: Math.min(Math.max(Number(get("GLV_WEB_POINTS", "40000")), 500), 60000),
     fitSize: Math.min(Math.max(Number(get("GLV_WEB_FIT", "2000")), 200), 5000),
   };
   return cached;
