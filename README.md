@@ -122,6 +122,18 @@ overlaps the network. The client sends its own
 The whole tree sends about 5.5 GB of text up and receives about 14 GB of vectors; stop the pod
 when `glv status` shows every corpus indexed.
 
+## Seeing the index: `web/`
+
+`web/` is a small Next.js app that draws a country-balanced sample of the indexed chunks as
+an orbiting 3-D point cloud (PCA of the embeddings, colour by nearest of eight legal domains,
+country toggles). It reads the same `.env` and never writes to the database.
+
+```sh
+cd web && npm install && npm run dev     # http://localhost:3000
+```
+
+Details and the variables it reads are in [web/README.md](web/README.md).
+
 ## Development
 
 ```sh
