@@ -1,13 +1,17 @@
 """Stages 3 to 7 as one pipeline: PLAN what changed, then PARSE, CHUNK, EMBED and STORE it.
 
-The unit of work is a group of documents whose chunks fill a few embedding batches. Each group
-is written in one transaction, so stopping at any moment loses at most one group and a rerun
-picks up from the stored hashes (premise P4).
+The unit of work is a group of documents whose chunks fill a few embedding batches. Three
+threads overlap the stages, so the embeddings server never waits for parsing or for the
+database: a producer parses and chunks groups, the caller's thread embeds them, a writer stores
+them. Each group is written in one transaction, so stopping at any moment loses at most the
+groups in flight and a rerun picks up from the stored hashes (premise P4).
 """
 
 from __future__ import annotations
 
 import logging
+import queue
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -22,6 +26,9 @@ from .store import Store
 from .tokenizer import Tokenizer
 
 log = logging.getLogger(__name__)
+
+Group = list[tuple[Document, list[Chunk]]]
+_END = None
 
 
 @dataclass(slots=True)
@@ -130,42 +137,109 @@ class Indexer:
             self.store.set_meta(chunks_per_second=f"{p.chunks_per_second:.2f}")
         return p
 
+    # --- one corpus, three threads ---
+
     def _run_corpus(self, pl: CorpusPlan) -> None:
         cid = self.store.upsert_corpus(pl.corpus, pl.total_files)
         if pl.to_delete:
             n = self.store.delete_documents(cid, pl.to_delete)
             log.info("%s: removed %d deleted documents", pl.corpus.path, n)
-        group: list[tuple[Document, list[Chunk]]] = []
-        pending = 0
-        for rel in pl.to_index:
-            if self.stop():
-                return
-            doc = parse_document(rel, pl.corpus.path, (self.tree.root / rel).read_bytes())
-            chunks = chunk_document(doc, self.tok, self.cfg.chunk_tokens, self.cfg.max_tokens)
-            group.append((doc, chunks))
-            pending += len(chunks)
-            if pending >= self._group_size():
-                self._flush(cid, group)
-                group, pending = [], 0
-        if group:
-            self._flush(cid, group)
+        if not pl.to_index:
+            if not self.stop():
+                self.store.complete_corpus(cid)
+            return
+
+        parsed: queue.Queue = queue.Queue(maxsize=2)
+        embedded: queue.Queue = queue.Queue(maxsize=2)
+        errors: list[BaseException] = []
+        abort = threading.Event()
+
+        def stopping() -> bool:
+            return abort.is_set() or self.stop()
+
+        producer = threading.Thread(
+            target=self._produce, args=(pl, parsed, errors, abort, stopping), daemon=True)
+        writer = threading.Thread(
+            target=self._write, args=(cid, embedded, errors, abort), daemon=True)
+        producer.start()
+        writer.start()
+        try:
+            while True:
+                group = parsed.get()
+                if group is _END:
+                    break
+                if stopping():
+                    continue  # drain the producer without embedding
+                try:
+                    vectors = self._embed(group)
+                except BaseException as exc:  # noqa: BLE001 - reported below
+                    errors.append(exc)
+                    abort.set()
+                    continue
+                embedded.put((group, vectors))
+        finally:
+            embedded.put(_END)
+            producer.join()
+            writer.join()
+        if errors:
+            raise errors[0]
         if not self.stop():
             self.store.complete_corpus(cid)
 
-    def _flush(self, corpus_id: int, group: list[tuple[Document, list[Chunk]]]) -> None:
-        p = self.progress
+    def _produce(self, pl: CorpusPlan, out: queue.Queue, errors: list, abort: threading.Event,
+                 stopping: Callable[[], bool]) -> None:
+        group: Group = []
+        pending = 0
+        try:
+            for rel in pl.to_index:
+                if stopping():
+                    break
+                doc = parse_document(rel, pl.corpus.path, (self.tree.root / rel).read_bytes())
+                chunks = chunk_document(doc, self.tok, self.cfg.chunk_tokens, self.cfg.max_tokens)
+                group.append((doc, chunks))
+                pending += len(chunks)
+                if pending >= self._group_size():
+                    out.put(group)
+                    group, pending = [], 0
+            if group and not stopping():
+                out.put(group)
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+            abort.set()
+        finally:
+            out.put(_END)
+
+    def _embed(self, group: Group) -> list[list[float]]:
         prefix = self.cfg.document_prefix
         texts = [embedding_input(doc, ch, prefix) for doc, chunks in group for ch in chunks]
-        vectors = self.client.embed_many(texts, self.cfg.batch_size, self.cfg.workers)
-        items = []
-        i = 0
-        for doc, chunks in group:
-            items.append((doc, chunks, vectors[i : i + len(chunks)]))
-            i += len(chunks)
-        self.store.write_documents(corpus_id, items)
-        p.files_done += len(group)
-        p.chunks_done += len(texts)
-        self.progress_cb(p)
+        return self.client.embed_many(texts, self.cfg.batch_size, self.cfg.workers)
+
+    def _write(self, corpus_id: int, inp: queue.Queue, errors: list,
+               abort: threading.Event) -> None:
+        p = self.progress
+        try:
+            while True:
+                item = inp.get()
+                if item is _END:
+                    break
+                if abort.is_set():
+                    continue
+                group, vectors = item
+                items = []
+                i = 0
+                for doc, chunks in group:
+                    items.append((doc, chunks, vectors[i : i + len(chunks)]))
+                    i += len(chunks)
+                self.store.write_documents(corpus_id, items)
+                p.files_done += len(group)
+                p.chunks_done += len(vectors)
+                self.progress_cb(p)
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+            abort.set()
+            # keep draining so the embedding thread never blocks on a full queue
+            while inp.get() is not _END:
+                pass
 
 
 def dry_run_counts(tree: Tree, corpus: Corpus, tok: Tokenizer, cfg: Config,

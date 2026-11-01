@@ -83,22 +83,34 @@ hundred chunks/s, so the whole tree is a few hours and a few dollars.
 
 1. Start a GPU pod (RunPod, Vast.ai, …) with the TEI CUDA image for its card, for example
    `ghcr.io/huggingface/text-embeddings-inference:89-latest` on an RTX 4090 (`86-latest` on
-   A10/A100/RTX 30xx, `1.9` for Hopper), the same `--model-id Snowflake/snowflake-arctic-embed-m-v2.0`,
-   `--max-client-batch-size 64`, and `--api-key <a secret>` so the public URL is not open.
-   Expose port 80 through the provider's HTTPS proxy. A Hugging Face Inference Endpoint running
-   this model works the same way with its bearer token.
+   A10/A100/RTX 30xx, `1.9` for Hopper). TEI reads its flags from environment variables, so set
+   these on the pod:
+   ```sh
+   MODEL_ID=Snowflake/snowflake-arctic-embed-m-v2.0
+   API_KEY=<a secret>              # the public URL is otherwise open to anyone
+   MAX_CLIENT_BATCH_SIZE=128       # chunks per request (default 32)
+   MAX_CONCURRENT_REQUESTS=4096    # the queue limit, counted in chunks (default 512)
+   MAX_BATCH_TOKENS=65536          # tokens per GPU batch (default 16384)
+   ```
+   Expose port 80 as an HTTP port; the provider gives an HTTPS proxy URL. A Hugging Face
+   Inference Endpoint running this model works the same way with its bearer token.
 2. In `.env`:
    ```sh
    TEI_URL=https://<pod-id>-80.proxy.runpod.net   # or the endpoint URL
    TEI_API_KEY=<the secret>
-   GLV_BATCH_SIZE=32      # fill the GPU; the per-request latency is now the network's
+   GLV_BATCH_SIZE=128     # match MAX_CLIENT_BATCH_SIZE; 32 if the pod keeps its default
    GLV_WORKERS=16
    ```
+   Over the internet each request costs a round trip of a few hundred milliseconds whatever
+   its size, so throughput is chunks-per-request × concurrent requests ÷ latency. The GPU is
+   idle most of the time; more GPUs do not help, larger requests do.
 3. `glv check`, then `glv index`. The run resumes anything a CPU run already stored, because
    the model, dimensions and index settings are the same.
 
-Measured on 2026-11-01 from a devcontainer in Brazil to a RunPod RTX-class pod: 250 chunks/s
-with 16 workers, versus 1.5 chunks/s on the local 6-core CPU. The client sends its own
+Measured on 2026-11-01 from a devcontainer in Brazil to a RunPod RTX-class pod with the
+default limits (32 per request, 16 workers): about 600 chunks/s, versus 1.5 chunks/s on the
+local 6-core CPU. Parsing, embedding and writing run in three threads so the local work
+overlaps the network. The client sends its own
 `User-Agent`, because the Cloudflare proxy in front of RunPod rejects Python's default one.
 
 The whole tree sends about 5.5 GB of text up and receives about 14 GB of vectors; stop the pod
