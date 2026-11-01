@@ -225,18 +225,36 @@ class Store:
     # --- index and search ---
 
     def build_hnsw(self, m: int = 16, ef_construction: int = 64,
-                   maintenance_work_mem: str = "2GB") -> None:
-        with self.conn.cursor() as cur:
-            cur.execute(sql.SQL("SET maintenance_work_mem = {}")
-                        .format(sql.Literal(maintenance_work_mem)))
-            cur.execute(
-                sql.SQL(
-                    "CREATE INDEX IF NOT EXISTS chunk_embedding_hnsw ON {} USING hnsw"
-                    " (embedding {}) WITH (m = {}, ef_construction = {})"
-                ).format(self._t("chunk"), sql.SQL(OPS[self.vector_type]),
-                         sql.Literal(m), sql.Literal(ef_construction))
-            )
-        self.conn.commit()
+                   maintenance_work_mem: str = "2GB", parallel: bool = True) -> None:
+        """Build the HNSW index once, after the bulk load.
+
+        A parallel build keeps its graph in dynamic shared memory sized by
+        maintenance_work_mem. Postgres in Docker has a 64 MB /dev/shm unless the container
+        sets shm_size, and then the build fails with "could not resize shared memory
+        segment … No space left on device". In that case it is retried without parallel
+        workers, which uses ordinary memory and is a few times slower.
+        """
+        create = sql.SQL(
+            "CREATE INDEX IF NOT EXISTS chunk_embedding_hnsw ON {} USING hnsw"
+            " (embedding {}) WITH (m = {}, ef_construction = {})"
+        ).format(self._t("chunk"), sql.SQL(OPS[self.vector_type]),
+                 sql.Literal(m), sql.Literal(ef_construction))
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute(sql.SQL("SET maintenance_work_mem = {}")
+                            .format(sql.Literal(maintenance_work_mem)))
+                if not parallel:
+                    cur.execute("SET max_parallel_maintenance_workers = 0")
+                cur.execute(create)
+            self.conn.commit()
+        except psycopg.Error as exc:
+            self.conn.rollback()
+            if parallel and "shared memory" in str(exc):
+                log.warning("parallel HNSW build failed (%s); retrying without parallel"
+                            " workers. Give the Postgres container shm_size: 2gb to avoid this.",
+                            str(exc).strip().splitlines()[0])
+                return self.build_hnsw(m, ef_construction, maintenance_work_mem, parallel=False)
+            raise
 
     def has_hnsw(self) -> bool:
         with self.conn.cursor() as cur:

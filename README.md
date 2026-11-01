@@ -71,6 +71,12 @@ discover → select → plan → parse → chunk → embed (TEI) → store (pgve
   index once at the end.
 - **Search** prefixes the question with `query: `, embeds it and ranks chunks by cosine.
 
+The HNSW index is built once, at the end of a run, or with `glv index --build-index`. The
+build is parallel and needs real shared memory: the pgvector service in
+`global-law-utility/docker-compose.yml` sets `shm_size: 2gb` for that reason. Without it
+Postgres reports "could not resize shared memory segment … No space left on device" and
+`glv` retries the build without parallel workers, which is slower but works.
+
 The index records model, dimensions, vector type and chunker version; `glv` refuses to write into
 an index built with other settings. Use `GLV_SCHEMA` to keep several indexes side by side.
 
