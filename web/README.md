@@ -25,6 +25,28 @@ The app reads the same settings as the Python side, in this order: the process e
 | `GLV_WEB_POINTS` | `12000` | points in the sample (500–20000, also `?n=` on the API) |
 | `GLV_WEB_FIT` | `2000` | embeddings used to fit the projection |
 
+## Serving it to the network
+
+The compose file in `../global-law-utility` has a `web` service that builds this directory
+into a self-contained image, joins the `utility` network (so `utility-pgvector` and
+`utility-embeddings` resolve) and publishes port 3000 on every interface of the host:
+
+```sh
+cd ../global-law-utility
+docker compose up -d --build web
+# then, from any machine on the LAN: http://<host-ip>:3000
+```
+
+Rebuild with the same command after changing the code. Without Docker, a production build
+bound to all interfaces does the same job:
+
+```sh
+npm run build && HOSTNAME=0.0.0.0 PORT=3000 npm start
+```
+
+The image is read-only against the database and holds no secrets; `DATABASE_URL` and
+`TEI_URL` come from the compose `environment` block.
+
 ## How it works
 
 `GET /api/points` builds the sample and caches it in the server process for fifteen minutes
