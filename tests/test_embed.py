@@ -35,10 +35,12 @@ class _Stub(BaseHTTPRequestHandler):
         self.end_headers()
 
     seen_auth = None
+    seen_ua = None
     reject_auth = False
 
     def do_POST(self):
         _Stub.seen_auth = self.headers.get("Authorization")
+        _Stub.seen_ua = self.headers.get("User-Agent")
         if _Stub.reject_auth:
             self.send_response(401)
             self.end_headers()
@@ -132,6 +134,7 @@ def test_api_key_is_sent_as_bearer(server):
     c = TEIClient(server, api_key="secret-key")
     c.embed(["x"])
     assert _Stub.seen_auth == "Bearer secret-key"
+    assert _Stub.seen_ua.startswith("global-law-vector/")
     _Stub.seen_auth = None
     TEIClient(server).embed(["x"])
     assert _Stub.seen_auth is None
@@ -142,5 +145,7 @@ def test_unauthorised_is_not_retried(server):
     try:
         with pytest.raises(EmbeddingError, match="TEI_API_KEY"):
             TEIClient(server, retries=3).embed(["x"])
+        with pytest.raises(EmbeddingError, match="HTTP 401"):
+            TEIClient(server, retries=3, api_key="wrong").embed(["x"])
     finally:
         _Stub.reject_auth = False

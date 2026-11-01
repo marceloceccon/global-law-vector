@@ -92,10 +92,14 @@ hundred chunks/s, so the whole tree is a few hours and a few dollars.
    TEI_URL=https://<pod-id>-80.proxy.runpod.net   # or the endpoint URL
    TEI_API_KEY=<the secret>
    GLV_BATCH_SIZE=32      # fill the GPU; the per-request latency is now the network's
-   GLV_WORKERS=8
+   GLV_WORKERS=16
    ```
 3. `glv check`, then `glv index`. The run resumes anything a CPU run already stored, because
    the model, dimensions and index settings are the same.
+
+Measured on 2026-11-01 from a devcontainer in Brazil to a RunPod RTX-class pod: 250 chunks/s
+with 16 workers, versus 1.5 chunks/s on the local 6-core CPU. The client sends its own
+`User-Agent`, because the Cloudflare proxy in front of RunPod rejects Python's default one.
 
 The whole tree sends about 5.5 GB of text up and receives about 14 GB of vectors; stop the pod
 when `glv status` shows every corpus indexed.

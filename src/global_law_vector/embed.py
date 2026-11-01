@@ -15,7 +15,12 @@ from collections.abc import Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
+from . import __version__
+
 log = logging.getLogger(__name__)
+
+# Cloudflare-fronted proxies (RunPod's, for one) ban the default "Python-urllib" agent.
+USER_AGENT = f"global-law-vector/{__version__}"
 
 
 class EmbeddingError(RuntimeError):
@@ -45,6 +50,7 @@ class TEIClient:
         data = json.dumps(payload).encode() if payload is not None else None
         req = urllib.request.Request(url, data=data, method="POST" if data else "GET")
         req.add_header("Content-Type", "application/json")
+        req.add_header("User-Agent", USER_AGENT)
         if self.api_key:
             req.add_header("Authorization", f"Bearer {self.api_key}")
         delay = 1.0
@@ -57,10 +63,12 @@ class TEIClient:
             except urllib.error.HTTPError as exc:
                 body = exc.read().decode(errors="replace")[:300]
                 if exc.code in (401, 403):
+                    who = "the proxy in front of TEI" if "cloudflare" in body.lower() or \
+                        "error code" in body.lower() else "TEI"
+                    hint = ("set TEI_API_KEY" if not self.api_key and who == "TEI"
+                            else f"{who} answered: {body.strip() or exc.reason}")
                     raise EmbeddingError(
-                        f"TEI {path} refused the request (HTTP {exc.code}): set TEI_API_KEY"
-                        if not self.api_key else
-                        f"TEI {path} rejected TEI_API_KEY (HTTP {exc.code})") from exc
+                        f"{path} refused with HTTP {exc.code}: {hint}") from exc
                 if exc.code in (429, 500, 502, 503, 504) and attempt < self.retries:
                     last = exc
                     log.warning("TEI %s -> %s, retrying in %.0fs: %s", path, exc.code, delay, body)
@@ -84,11 +92,15 @@ class TEIClient:
     # --- API ---
 
     def health(self) -> bool:
+        return self.health_error() is None
+
+    def health_error(self) -> str | None:
+        """None when /health answers, else why it did not."""
         try:
             self._request("/health")
-            return True
-        except EmbeddingError:
-            return False
+            return None
+        except EmbeddingError as exc:
+            return str(exc)
 
     def info(self) -> ModelInfo:
         raw = self._request("/info")

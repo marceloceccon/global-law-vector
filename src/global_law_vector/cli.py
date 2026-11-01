@@ -153,8 +153,9 @@ def _check_services(cfg: Config, need_tei: bool = True, need_db: bool = True) ->
     if need_tei:
         from .embed import TEIClient
 
-        if not TEIClient(cfg.tei_url, retries=0, timeout=5, api_key=cfg.tei_api_key).health():
-            problems.append(f"embeddings server not reachable at {cfg.tei_url} (TEI_URL)")
+        why = TEIClient(cfg.tei_url, retries=0, timeout=10, api_key=cfg.tei_api_key).health_error()
+        if why is not None:
+            problems.append(f"embeddings server not reachable at {cfg.tei_url} (TEI_URL): {why}")
     if need_db:
         try:
             import psycopg
@@ -171,8 +172,14 @@ def _preflight(cfg: Config, need_tei: bool = True, need_db: bool = True) -> int:
         return 0
     for pr in problems:
         print(f"error: {pr}", file=sys.stderr)
-    print(REACH_HINT, file=sys.stderr)
+    if _looks_local(cfg):
+        print(REACH_HINT, file=sys.stderr)
     return 1
+
+
+def _looks_local(cfg: Config) -> bool:
+    return any(h in cfg.tei_url or h in cfg.database_url
+               for h in ("127.0.0.1", "localhost", "utility-"))
 
 
 def cmd_check(cfg: Config, args: argparse.Namespace) -> int:
@@ -189,8 +196,9 @@ def cmd_check(cfg: Config, args: argparse.Namespace) -> int:
           f"{'' if cfg.selection_file.is_file() else '  (not created yet)'}")
     from .embed import EmbeddingError, TEIClient
 
-    client = TEIClient(cfg.tei_url, retries=0, timeout=5, api_key=cfg.tei_api_key)
-    if client.health():
+    client = TEIClient(cfg.tei_url, retries=0, timeout=10, api_key=cfg.tei_api_key)
+    why = client.health_error()
+    if why is None:
         info = client.info()
         dims = info.dims
         if dims is None:
@@ -209,7 +217,7 @@ def cmd_check(cfg: Config, args: argparse.Namespace) -> int:
             print(f"                  WARNING: GLV_MODEL is {cfg.model}")
             ok = False
     else:
-        print(f"embeddings        UNREACHABLE at {cfg.tei_url}")
+        print(f"embeddings        UNREACHABLE at {cfg.tei_url}: {why}")
         ok = False
     problems = _check_services(cfg, need_tei=False, need_db=True)
     if problems:
@@ -218,7 +226,7 @@ def cmd_check(cfg: Config, args: argparse.Namespace) -> int:
     else:
         print(f"database          {cfg.database_url}  schema={cfg.schema} "
               f"{cfg.vector_type}({cfg.dims})")
-    if not ok:
+    if not ok and _looks_local(cfg):
         print()
         print(REACH_HINT)
     return 0 if ok else 1
