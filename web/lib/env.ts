@@ -43,7 +43,18 @@ let cached: Env | undefined;
 
 export function env(): Env {
   if (cached) return cached;
-  const repoEnv = parseDotenv(path.resolve(process.cwd(), "..", ".env"));
+  // The repository .env is one level up from web/ when run with `next dev|start`, and three
+  // up when the standalone server runs (it chdirs into web/.next/standalone). Take the first
+  // ancestor that has one.
+  let repoEnv: Record<string, string> = {};
+  for (let dir = path.resolve(process.cwd(), ".."); ; dir = path.dirname(dir)) {
+    const file = path.join(dir, ".env");
+    if (fs.existsSync(file)) {
+      repoEnv = parseDotenv(file);
+      break;
+    }
+    if (dir === path.dirname(dir)) break;
+  }
   const get = (k: string, d = "") => process.env[k] ?? repoEnv[k] ?? d;
 
   const schema = get("GLV_SCHEMA", "global_law");
