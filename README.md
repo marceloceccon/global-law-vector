@@ -42,15 +42,16 @@ tree is found at `GLOBAL_LAW_PATH`, else at `./global-law` or `../global-law`.
 | Command | Does |
 | --- | --- |
 | `glv check` | Is the tree found, do the embeddings server and the database answer, and with which model. |
-
-All settings are environment variables, see `.env.example`: tree path, database URL, embeddings URL and optional API key, model, dimensions, chunk size, batch size, workers, timeout.
 | `glv list [--country X]` | Every corpus in the tree, marking the selected ones. |
 | `glv select --country X --corpus c/l/n --exclude … --all --clear --show` | Edit `selection.toml` and show its cost: files, bytes, estimated chunks and time. |
 | `glv index [--dry-run] [--country …] [--max-files N]` | Index the selection (or a one-off selection). Resumable: a rerun indexes only new, changed or deleted files. |
 | `glv status [--all]` | Per corpus: not indexed, partial, stale (corpus commit changed) or indexed. |
 | `glv search "question" [--country X] [--top N]` | Cosine search; prints score, path, title, citation, heading and a snippet. |
 | `glv reset` | Drop the schema (asks first). |
+| `glv project [--points 40000] [--fit 20000]` | Cache a 3-D UMAP layout of a country-balanced sample of the index for the web viewer (needs the `project` extra). |
 | `glv tui` | Select with live totals, run with progress, search with detail. |
+
+All settings are environment variables, see `.env.example`: tree path, database URL, embeddings URL and optional API key, model, dimensions, chunk size, batch size, workers, timeout.
 
 ## How it works
 
@@ -125,12 +126,15 @@ when `glv status` shows every corpus indexed.
 ## Seeing the index: `web/`
 
 `web/` is a small Next.js app that draws a country-balanced sample of the indexed chunks as
-an orbiting 3-D point cloud (PCA of the embeddings, colour by nearest of eight legal domains,
-country toggles). It reads the same `.env` and never writes to the database.
+an orbiting 3-D point cloud, coloured by country (or, on a toggle, by nearest of eight legal
+domains) with country filters. It reads the same `.env` and never writes to the database.
 
 ```sh
-cd web && npm install && npm run dev     # http://localhost:3000
+pip install -e '.[project]' && glv project   # UMAP layout of 40,000 chunks, ~2 min, cached
+cd web && npm install && npm run dev         # http://localhost:3000
 ```
+
+Without the `glv project` step the viewer falls back to a PCA fitted on the fly.
 
 Details and the variables it reads are in [web/README.md](web/README.md).
 

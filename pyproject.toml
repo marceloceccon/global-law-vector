@@ -16,6 +16,7 @@ dependencies = [
 [project.optional-dependencies]
 tokenizer = ["tokenizers>=0.15"]
 tui = ["textual>=0.50"]
+project = ["umap-learn>=0.5", "numpy>=1.26"]
 dev = ["pytest>=8", "ruff>=0.4", "tokenizers>=0.15", "textual>=0.50"]
 
 [project.scripts]

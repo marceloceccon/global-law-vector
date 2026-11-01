@@ -22,8 +22,9 @@ The app reads the same settings as the Python side, in this order: the process e
 | `GLV_VECTOR_TYPE`, `GLV_DIMS` | `halfvec`, `768` | the cast for vector parameters |
 | `TEI_URL`, `TEI_API_KEY` | `http://127.0.0.1:8080`, unset | embedding the eight domain phrases once per process |
 | `GLV_QUERY_PREFIX` | `query: ` | prefix for those phrases |
-| `GLV_WEB_POINTS` | `12000` | points in the sample (500–20000, also `?n=` on the API) |
-| `GLV_WEB_FIT` | `2000` | embeddings used to fit the projection |
+| `GLV_PROJECTION` | `$GLV_CACHE_DIR/projection.json`, i.e. `~/.cache/global-law-vector/projection.json` | the UMAP layout written by `glv project` |
+| `GLV_WEB_POINTS` | `40000` | points in the PCA fallback sample (500–60000, also `?n=` on the API); the UMAP file fixes its own size |
+| `GLV_WEB_FIT` | `2000` | embeddings used to fit the PCA fallback |
 
 ## Serving it to the network
 
@@ -49,36 +50,45 @@ The image is read-only against the database and holds no secrets; `DATABASE_URL`
 
 ## How it works
 
-`GET /api/points` builds the sample and caches it in the server process for fifteen minutes
-(`?refresh=1` rebuilds). The first call takes a few seconds on a 1.6 M-chunk index; the rest
-of the page is static.
+`GET /api/points` builds the payload and caches it in the server process for fifteen minutes
+(`?refresh=1` rebuilds; a newer projection file also invalidates it). The first call takes a
+second or two with the UMAP file, about ten seconds on the PCA fallback.
 
-1. **Sample.** One pass over the chunk/document/corpus join ranks every chunk randomly within
-   its country. The sample is balanced across countries (each gets an equal share, unused share
-   flows to the larger ones), so Malta's 1,280 chunks are as visible as France's 800,000.
-2. **Project 768 → 3.** PCA, fitted on the first 2,000 sampled embeddings with orthogonal
-   iteration (`lib/pca.ts`). The three axes are plain vectors, so Postgres projects every other
-   point with one inner product per axis (`embedding <#> axis`). Only the fit sample's vectors
-   ever leave the database. PCA keeps global structure (language and country separate
-   clearly); it does not unfold local clusters the way UMAP would.
-3. **Colour by domain.** Eight fixed legal domains (`lib/domains.ts`). Their phrases are
-   embedded with the same model through TEI; if TEI is unreachable, the average embedding of
-   up to 300 chunks mentioning each domain's keywords stands in. Cosine similarity to the eight
-   vectors is computed in SQL, the best wins, and the margin to the runner-up (as a percentile)
-   fades uncertain points towards neutral. The legend says which source was used.
-4. **Render.** In the browser, `lib/spatial.ts` puts the projected points in a uniform grid
-   and measures each point's local density and two nearest neighbours (under a second for
-   40,000 points). Four additive layers follow from that: small cores that whiten and twinkle
-   where the cloud is dense, wide faint halos that strengthen with density, a Gaussian-jittered
-   dust ghost per point that spreads wider where the cloud is thin, and 1-px filaments between
-   neighbours. A bloom pass (`@react-three/postprocessing`) blurs whatever exceeds the luminance
-   threshold, which with additive blending is the cluster cores. CSS light shafts sit on top
-   with screen blending. Country toggles rewrite per-vertex visibility attributes on all
-   layers; nothing is re-fetched. OrbitControls with auto-rotate; no picking.
+1. **Sample and layout: `glv project`** (`src/global_law_vector/project.py`). One pass over
+   the chunk/document/corpus join ranks every chunk randomly within its country; the sample is
+   balanced across countries (each gets an equal share, unused share flows to the larger
+   ones), so Malta's 1,280 chunks are as visible as France's 800,000. The order is shuffled,
+   the vectors are fetched, and UMAP (`umap-learn`) reduces them to three components:
+   `n_neighbors=20`, `min_dist=0.1`, `metric=cosine`, `random_state=42`, fitted on the first
+   20,000 points and the remaining 20,000 placed with `transform`. Coordinates are centred
+   on the median and scaled so the 99th-percentile radius is 1. On a six-core desktop the fit
+   takes about 50 s and the whole command about two minutes; the result is 1.4 MB of JSON in
+   `~/.cache/global-law-vector/projection.json`. Rerun it after indexing more corpora.
+2. **Fallback: PCA in the API.** Without that file the API draws its own balanced sample,
+   fits PCA on 2,000 embeddings with orthogonal iteration (`lib/pca.ts`) and lets Postgres
+   project the rest with one inner product per axis. The caption on the page says which
+   method is on screen. PCA keeps the global shape but squashes local structure; with UMAP,
+   84 % of a point's ten nearest neighbours share its country (measured on this index),
+   which is the structure the viewer is meant to show.
+3. **Colour.** The primary encoding is country: ten muted OKLCH hues (`lib/colors.ts`),
+   assigned in alphabetical order of the countries present, validated against the page
+   background with the dataviz palette validator (lightness, chroma, contrast and adjacent
+   legend pairs pass; ten mutually colour-blind-safe hues do not exist, so the name always sits
+   beside the swatch and the toggles are the exact way to isolate a country). The secondary
+   encoding, on a toggle, is the nearest of eight fixed legal domains (`lib/domains.ts`):
+   their phrases are embedded with the index model through TEI, or, if TEI is unreachable,
+   keyword centroids from the sample stand in; cosine similarity to the eight vectors is
+   computed in SQL and z-scored over the sample, the best wins, and the margin to the runner-up
+   fades uncertain points towards neutral. Both colours travel to the GPU as vertex attributes,
+   so switching is instant.
+4. **Render.** Two additive layers from one `BufferGeometry`: small soft discs, and a wide
+   faint halo whose strength follows local density (measured in the browser by
+   `lib/spatial.ts`, a uniform-grid pass that takes well under a second). Blending is modest
+   enough that dense regions brighten without turning white. A faint cube at the
+   normalisation extent gives orientation while orbiting. Country toggles rewrite a per-vertex
+   visibility attribute; nothing is re-fetched. OrbitControls with slow auto-rotate; no
+   picking, no post-processing.
 
-   Tuning knobs are the `size`, `alpha`, `gain` props of the layers at the bottom of
-   `components/PointCloud.tsx`, the `Bloom` props beside them, and `GLV_WEB_POINTS`
-   (40,000 by default; 60,000 is the cap, and a laptop GPU is happier at 20,000).
-
-The palette is the dark-mode categorical set of the dataviz reference palette, validated for
-colour-vision deficiency against the page background.
+   Tuning knobs are the `size` and `alpha` props of the two layers near the bottom of
+   `components/PointCloud.tsx`, and `--points` on `glv project` (40,000 by default; a laptop
+   GPU is comfortable there, and 20,000 is a safe choice for integrated graphics).

@@ -7,6 +7,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
+import { projectionPath } from "./projection";
 
 export type Env = {
   databaseUrl: string;
@@ -18,8 +19,10 @@ export type Env = {
   queryPrefix: string;
   /** Points in the visualisation sample. */
   points: number;
-  /** Embeddings used to fit the 3-D projection (a prefix of the sample). */
+  /** Embeddings used to fit the PCA fallback (a prefix of the sample). */
   fitSize: number;
+  /** The UMAP layout written by `glv project`; PCA is used when it is missing. */
+  projectionFile: string;
 };
 
 function parseDotenv(file: string): Record<string, string> {
@@ -72,6 +75,7 @@ export function env(): Env {
     queryPrefix: get("GLV_QUERY_PREFIX", "query: "),
     points: Math.min(Math.max(Number(get("GLV_WEB_POINTS", "40000")), 500), 60000),
     fitSize: Math.min(Math.max(Number(get("GLV_WEB_FIT", "2000")), 200), 5000),
+    projectionFile: projectionPath(get),
   };
   return cached;
 }

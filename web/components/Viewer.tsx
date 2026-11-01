@@ -1,13 +1,14 @@
 "use client";
 
 /**
- * Client shell: fetches the sample once, owns the country toggle state and hands both to the
- * canvas and the overlay. The canvas is loaded client-side only (WebGL has no server render).
+ * Client shell: fetches the sample once, owns the country toggles and the colour mode, and
+ * hands them to the canvas and the overlay. The canvas is loaded client-side only.
  */
 import dynamic from "next/dynamic";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { PointsPayload } from "@/lib/points";
 import Overlay from "./Overlay";
+import type { ColorMode } from "./PointCloud";
 
 const PointCloud = dynamic(() => import("./PointCloud"), { ssr: false });
 
@@ -17,6 +18,7 @@ export default function Viewer() {
   const [data, setData] = useState<PointsPayload | null>(null);
   const [status, setStatus] = useState<Status>({ kind: "loading" });
   const [enabled, setEnabled] = useState<ReadonlySet<string>>(new Set());
+  const [mode, setMode] = useState<ColorMode>("country");
 
   useEffect(() => {
     const ctl = new AbortController();
@@ -61,13 +63,10 @@ export default function Viewer() {
 
   return (
     <>
-      <div className="stage">{data && visible && <PointCloud data={data} visible={visible} />}</div>
-      <div className="shafts" aria-hidden="true">
-        <span /><span /><span /><span /><span />
-      </div>
+      <div className="stage">{data && visible && <PointCloud data={data} visible={visible} mode={mode} />}</div>
       {status.kind === "loading" && (
         <div className="notice">
-          <div className="pulse">sampling the index and fitting the projection…</div>
+          <div className="pulse">loading the sample…</div>
         </div>
       )}
       {status.kind === "error" && (
@@ -79,7 +78,17 @@ export default function Viewer() {
           </div>
         </div>
       )}
-      {data && visible && <Overlay data={data} visible={visible} enabled={enabled} onToggle={toggle} onAll={setAll} />}
+      {data && visible && (
+        <Overlay
+          data={data}
+          visible={visible}
+          enabled={enabled}
+          mode={mode}
+          onToggle={toggle}
+          onAll={setAll}
+          onMode={setMode}
+        />
+      )}
     </>
   );
 }

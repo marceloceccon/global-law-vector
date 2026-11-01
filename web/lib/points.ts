@@ -2,21 +2,26 @@
  * Builds the point-cloud payload from the tables the Python indexer filled
  * (`{schema}.corpus`, `.document`, `.chunk`). Nothing is written to the database.
  *
- * Steps, all cached in-process for CACHE_TTL_MS:
- *  1. Sample: up to `n` chunk ids, balanced across countries (water-filling: every country
- *     gets min(its size, an equal share), unused share flows to the larger ones), so small
- *     countries stay visible next to France's 800k chunks.
- *  2. Project: fit PCA on the first `fitSize` sampled embeddings (the only vectors that leave
- *     Postgres), then let Postgres project every sampled chunk with `embedding <#> axis`.
- *  3. Colour: cosine similarity to the eight domain vectors (TEI-embedded phrases, or keyword
- *     centroids when TEI is unreachable), also computed in SQL. The best domain wins; the
- *     margin to the runner-up becomes a confidence that fades uncertain points to neutral.
+ * Coordinates come from one of two places:
+ *  - the UMAP layout `glv project` cached on disk (preferred, see lib/projection.ts): its
+ *    sample of chunk ids and their 3-D positions are used as they are;
+ *  - otherwise a PCA fitted here on the first `fitSize` of a fresh country-balanced sample,
+ *    with Postgres projecting every sampled chunk by inner product (`embedding <#> axis`).
+ *
+ * Either way the domain colouring is computed on the fly: cosine similarity to the eight
+ * domain vectors (TEI-embedded phrases, or keyword centroids when TEI is unreachable),
+ * z-scored over the sample so a broad phrase cannot claim half the cloud. The best domain
+ * wins; the margin to the runner-up becomes a confidence that fades uncertain points.
+ *
+ * The payload is cached in-process for CACHE_TTL_MS; a new projection file invalidates it.
  */
+import { countryColor } from "./colors";
 import { pool, vectorCast, vectorLiteral } from "./db";
 import { DOMAINS } from "./domains";
 import { embedQueries } from "./embed";
 import { env } from "./env";
 import { dot, fitPCA, parseVector, type Projection } from "./pca";
+import { loadProjection, type ProjectionFile } from "./projection";
 
 const CACHE_TTL_MS = 15 * 60_000;
 
@@ -24,11 +29,14 @@ export type PointsPayload = {
   generatedAt: string;
   totalChunks: number;
   sample: number;
-  countries: { name: string; total: number; sampled: number }[];
+  model: string | null;
+  countries: { name: string; total: number; sampled: number; color: string }[];
   corpora: string[];
   domains: { id: string; label: string; color: string }[];
   domainSource: "tei" | "keyword-centroids";
-  projection: { method: "pca"; fitSize: number; spread: number[] };
+  projection:
+    | { method: "umap"; fitSize: number; createdAt: string; params: ProjectionFile["params"] }
+    | { method: "pca"; fitSize: number; spread: number[] };
   /** Parallel arrays, length `sample`; xyz has 3 entries per point. */
   xyz: number[];
   country: number[];
@@ -52,7 +60,7 @@ declare global {
   // eslint-disable-next-line no-var
   var __glvCache: {
     domains?: Promise<DomainVectors>;
-    payload?: Map<number, { at: number; value: Promise<PointsPayload> }>;
+    payload?: Map<string, { at: number; value: Promise<PointsPayload> }>;
   };
 }
 const cache = (globalThis.__glvCache ??= {});
@@ -61,9 +69,9 @@ function t(name: string): string {
   return `${env().schema}.${name}`;
 }
 
-// --- 1. sample -------------------------------------------------------------------------
+// --- 1. sample (PCA path only) -------------------------------------------------------------
 
-type Sampled = { ids: number[]; country: string[]; totals: Map<string, number> };
+type Sampled = { ids: number[]; totals: Map<string, number> };
 
 async function sampleIds(n: number): Promise<Sampled> {
   // One pass over the join: every chunk gets a random rank within its country and the
@@ -90,24 +98,27 @@ async function sampleIds(n: number): Promise<Sampled> {
     list.push(Number(r.id));
   }
 
-  // Water-filling allocation of n across countries.
+  // Water-filling allocation of n across countries, smallest first.
   const names = [...byCountry.keys()].sort((a, b) => byCountry.get(a)!.length - byCountry.get(b)!.length);
   let remaining = n;
   const ids: number[] = [];
-  const country: string[] = [];
   names.forEach((name, i) => {
     const share = Math.floor(remaining / (names.length - i));
     const take = Math.min(share, byCountry.get(name)!.length);
-    for (const id of byCountry.get(name)!.slice(0, take)) {
-      ids.push(id);
-      country.push(name);
-    }
+    ids.push(...byCountry.get(name)!.slice(0, take));
     remaining -= take;
   });
-  return { ids, country, totals };
+  // Shuffle so the PCA fit prefix is as balanced as the whole.
+  let seed = 42;
+  for (let i = ids.length - 1; i > 0; i--) {
+    seed = (Math.imul(seed, 1103515245) + 12345) >>> 0;
+    const j = seed % (i + 1);
+    [ids[i], ids[j]] = [ids[j], ids[i]];
+  }
+  return { ids, totals };
 }
 
-// --- 2. projection -----------------------------------------------------------------------
+// --- 2. PCA fallback -----------------------------------------------------------------------
 
 async function fitProjection(ids: number[]): Promise<Projection> {
   const { rows } = await pool().query<{ embedding: string }>(
@@ -174,7 +185,7 @@ async function keywordCentroids(sampleIds: number[], mean: Float64Array): Promis
   return out;
 }
 
-async function domainVectors(sampleIds: number[], mean: Float64Array): Promise<DomainVectors> {
+async function domainVectors(sampleIds: number[], mean: () => Promise<Float64Array>): Promise<DomainVectors> {
   // Phrase embeddings never change, so a successful TEI answer is kept for the process;
   // a failure is not, so a server that comes up later is used on the next build.
   if (!cache.domains) {
@@ -183,7 +194,7 @@ async function domainVectors(sampleIds: number[], mean: Float64Array): Promise<D
     else {
       console.warn("[glv-web] colouring domains from keyword centroids instead of TEI");
       return {
-        vectors: await keywordCentroids(sampleIds, mean),
+        vectors: await keywordCentroids(sampleIds, await mean()),
         source: "keyword-centroids",
         centered: true,
       };
@@ -194,15 +205,51 @@ async function domainVectors(sampleIds: number[], mean: Float64Array): Promise<D
 
 // --- assemble ----------------------------------------------------------------------------
 
-async function build(n: number): Promise<PointsPayload> {
+type Layout = {
+  ids: number[];
+  /** xyz per id, aligned with `ids`; null means Postgres projects (PCA path). */
+  xyz: Float32Array | null;
+  totals: Map<string, number>;
+  pca: Projection | null;
+  meta: PointsPayload["projection"];
+};
+
+async function layout(n: number, file: string): Promise<Layout> {
+  const proj = loadProjection(file);
+  if (proj) {
+    const totals = new Map(Object.entries(proj.country_totals));
+    return {
+      ids: proj.ids,
+      xyz: Float32Array.from(proj.xyz),
+      totals,
+      pca: null,
+      meta: { method: "umap", fitSize: proj.params.fit, createdAt: proj.created_at, params: proj.params },
+    };
+  }
+  console.warn(`[glv-web] no projection at ${file}; falling back to PCA (run \`glv project\`)`);
   const e = env();
   const sampled = await sampleIds(n);
-  const projection = await fitProjection(sampled.ids.slice(0, e.fitSize));
-  const domains = await domainVectors(sampled.ids, projection.mean);
+  const pca = await fitProjection(sampled.ids.slice(0, e.fitSize));
+  return {
+    ids: sampled.ids,
+    xyz: null,
+    totals: sampled.totals,
+    pca,
+    meta: { method: "pca", fitSize: Math.min(e.fitSize, sampled.ids.length), spread: pca.spread.map(round) },
+  };
+}
 
-  // Projection and similarities in SQL: 3 inner products + 8 similarities per chunk.
-  const params: unknown[] = [sampled.ids];
-  const axisCols = projection.axes.map((a, i) => {
+async function build(n: number, file: string): Promise<PointsPayload> {
+  const e = env();
+  const lay = await layout(n, file);
+  // The PCA fit's mean doubles as the sample mean the centroid fallback needs; on the UMAP
+  // path it is fitted lazily, only if TEI turns out to be unreachable.
+  const meanOf = async () => (lay.pca ?? (lay.pca = await fitProjection(lay.ids.slice(0, e.fitSize)))).mean;
+  const domains = await domainVectors(lay.ids, meanOf);
+
+  // Projection (PCA path) and similarities in SQL: 3 inner products + 8 similarities per chunk.
+  const params: unknown[] = [lay.ids];
+  const axisCols = (lay.xyz ? [] : lay.pca!.axes).map((a, i) => {
     params.push(vectorLiteral(a));
     return `-(ch.embedding <#> ${vectorCast(params.length)}) AS p${i}`;
   });
@@ -213,20 +260,29 @@ async function build(n: number): Promise<PointsPayload> {
       ? `-(ch.embedding <#> ${cast}) AS s${i}` // (e − μ)·v, with μ·v subtracted below
       : `1 - (ch.embedding <=> ${cast}) AS s${i}`;
   });
-  const simOffset = domains.vectors.map((v) => (domains.centered ? dot(projection.mean, v) : 0));
+  const simOffset = domains.vectors.map((v) => (domains.centered ? dot(lay.pca!.mean, v) : 0));
   const sql = `
-    SELECT ch.id, co.country, co.path AS corpus, ${axisCols.join(", ")}, ${simCols.join(", ")}
+    SELECT ch.id, co.country, co.path AS corpus${axisCols.length ? ", " + axisCols.join(", ") : ""}, ${simCols.join(", ")}
     FROM ${t("chunk")} ch
     JOIN ${t("document")} d  ON d.id = ch.document_id
     JOIN ${t("corpus")}   co ON co.id = d.corpus_id
     WHERE ch.id = ANY($1::bigint[])`;
   const { rows } = await pool().query<Record<string, string | number>>(sql, params);
 
-  const meanOffset = projection.axes.map((a) => dot(projection.mean, a));
-  const scale = 1 / (2.5 * projection.spread[0]); // the cloud sits roughly in [-1, 1]³
+  // Keep the layout's order (the cached xyz is aligned with it); chunks deleted since the
+  // projection was made simply drop out.
+  const byId = new Map(rows.map((r) => [Number(r.id), r]));
+  const kept: { r: Record<string, string | number>; i: number }[] = [];
+  lay.ids.forEach((id, i) => {
+    const r = byId.get(id);
+    if (r) kept.push({ r, i });
+  });
+
+  const meanOffset = lay.pca && !lay.xyz ? lay.pca.axes.map((a) => dot(lay.pca!.mean, a)) : [];
+  const scale = lay.pca && !lay.xyz ? 1 / (2.5 * lay.pca.spread[0]) : 1; // PCA cloud roughly in [-1, 1]³
   const countryIndex = new Map<string, number>();
   const corpusIndex = new Map<string, number>();
-  const countries: PointsPayload["countries"] = [];
+  const countryNames: string[] = [];
   const corpora: string[] = [];
   const xyz: number[] = [];
   const country: number[] = [];
@@ -239,37 +295,37 @@ async function build(n: number): Promise<PointsPayload> {
   // otherwise claim half the cloud; z-scores make the colour mean "closer to this domain than
   // the typical chunk is", which is what the eye should read.
   const k = DOMAINS.length;
-  const sims = new Float64Array(rows.length * k);
-  rows.forEach((r, p) => {
+  const sims = new Float64Array(kept.length * k);
+  kept.forEach(({ r }, p) => {
     for (let i = 0; i < k; i++) sims[p * k + i] = Number(r[`s${i}`]) - simOffset[i];
   });
   const zMean = new Float64Array(k), zStd = new Float64Array(k);
   for (let i = 0; i < k; i++) {
     let s = 0, ss = 0;
-    for (let p = 0; p < rows.length; p++) { const v = sims[p * k + i]; s += v; ss += v * v; }
-    zMean[i] = s / rows.length;
-    zStd[i] = Math.sqrt(Math.max(ss / rows.length - zMean[i] * zMean[i], 1e-12));
+    for (let p = 0; p < kept.length; p++) { const v = sims[p * k + i]; s += v; ss += v * v; }
+    zMean[i] = s / kept.length;
+    zStd[i] = Math.sqrt(Math.max(ss / kept.length - zMean[i] * zMean[i], 1e-12));
   }
 
-  rows.forEach((r, p) => {
+  kept.forEach(({ r, i: li }, p) => {
     let ci = countryIndex.get(r.country as string);
     if (ci === undefined) {
-      ci = countries.length;
+      ci = countryNames.length;
       countryIndex.set(r.country as string, ci);
-      countries.push({ name: r.country as string, total: sampled.totals.get(r.country as string) ?? 0, sampled: 0 });
+      countryNames.push(r.country as string);
     }
-    countries[ci].sampled++;
     let ki = corpusIndex.get(r.corpus as string);
     if (ki === undefined) {
       ki = corpora.length;
       corpusIndex.set(r.corpus as string, ki);
       corpora.push(r.corpus as string);
     }
-    for (let i = 0; i < 3; i++) xyz.push(round((Number(r[`p${i}`]) - meanOffset[i]) * scale));
+    if (lay.xyz) xyz.push(lay.xyz[li * 3], lay.xyz[li * 3 + 1], lay.xyz[li * 3 + 2]);
+    else for (let a = 0; a < 3; a++) xyz.push(round((Number(r[`p${a}`]) - meanOffset[a]) * scale));
     let best = 0, second = -Infinity, bestZ = -Infinity;
-    for (let i = 0; i < k; i++) {
-      const z = (sims[p * k + i] - zMean[i]) / zStd[i];
-      if (z > bestZ) { second = bestZ; bestZ = z; best = i; }
+    for (let d = 0; d < k; d++) {
+      const z = (sims[p * k + d] - zMean[d]) / zStd[d];
+      if (z > bestZ) { second = bestZ; bestZ = z; best = d; }
       else if (z > second) second = z;
     }
     country.push(ci);
@@ -284,21 +340,30 @@ async function build(n: number): Promise<PointsPayload> {
   const confidence = new Array<number>(margins.length);
   order.forEach(([, i], rank) => (confidence[i] = round(rank / Math.max(1, margins.length - 1))));
 
-  const totalChunks = [...sampled.totals.values()].reduce((a, b) => a + b, 0);
-  countries.sort((a, b) => a.name.localeCompare(b.name));
-  // Re-map country indices to the sorted order.
-  const remap = new Map(countries.map((c, i) => [countryIndex.get(c.name)!, i]));
+  // Countries alphabetical; colours follow that order (see lib/colors.ts).
+  const sortedNames = [...countryNames].sort((a, b) => a.localeCompare(b));
+  const remap = new Map(sortedNames.map((name, i) => [countryIndex.get(name)!, i]));
   for (let i = 0; i < country.length; i++) country[i] = remap.get(country[i])!;
+  const sampledPer = new Array<number>(sortedNames.length).fill(0);
+  for (const c of country) sampledPer[c]++;
+  const countries = sortedNames.map((name, i) => ({
+    name,
+    total: lay.totals.get(name) ?? 0,
+    sampled: sampledPer[i],
+    color: countryColor(i),
+  }));
 
+  const model = loadProjection(file)?.model ?? null;
   return {
     generatedAt: new Date().toISOString(),
-    totalChunks,
-    sample: rows.length,
+    totalChunks: [...lay.totals.values()].reduce((a, b) => a + b, 0),
+    sample: kept.length,
+    model,
     countries,
     corpora,
     domains: DOMAINS.map(({ id, label, color }) => ({ id, label, color })),
     domainSource: domains.source,
-    projection: { method: "pca", fitSize: Math.min(e.fitSize, sampled.ids.length), spread: projection.spread.map(round) },
+    projection: lay.meta,
     xyz,
     country,
     corpus,
@@ -310,11 +375,21 @@ async function build(n: number): Promise<PointsPayload> {
 const round = (v: number) => Math.round(v * 1000) / 1000;
 
 export function getPoints(n: number, refresh = false): Promise<PointsPayload> {
+  const e = env();
+  // The cache key carries the projection file's mtime, so a new `glv project` run is served
+  // on the next request without a restart.
+  let stamp = "pca";
+  try {
+    stamp = String(loadProjection(e.projectionFile)?.created_at ?? "pca");
+  } catch (err) {
+    console.warn(`[glv-web] ${(err as Error).message}`);
+  }
+  const key = `${n}:${stamp}`;
   const map = (cache.payload ??= new Map());
-  const hit = map.get(n);
+  const hit = map.get(key);
   if (hit && !refresh && Date.now() - hit.at < CACHE_TTL_MS) return hit.value;
-  const value = build(n);
-  map.set(n, { at: Date.now(), value });
-  value.catch(() => map.delete(n));
+  const value = build(n, e.projectionFile);
+  map.set(key, { at: Date.now(), value });
+  value.catch(() => map.delete(key));
   return value;
 }

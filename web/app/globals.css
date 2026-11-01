@@ -1,6 +1,6 @@
 :root {
-  --bg: #04060d;
-  --panel: rgba(8, 12, 24, 0.72);
+  --bg: #0b0d12;
+  --panel: rgba(14, 17, 24, 0.78);
   --line: rgba(255, 255, 255, 0.08);
   --text: #e6e9f2;
   --muted: #8b93a7;
@@ -22,52 +22,14 @@ body {
   overflow: hidden;
 }
 
-/* Full-viewport stage: a soft nebula gradient behind a transparent WebGL canvas. */
+/* Full-viewport stage: a flat, very dark surface behind a transparent WebGL canvas. */
 .stage {
   position: fixed;
   inset: 0;
-  background:
-    radial-gradient(ellipse 70% 60% at 60% 45%, rgba(40, 60, 120, 0.22), transparent 70%),
-    radial-gradient(ellipse 50% 50% at 25% 70%, rgba(90, 40, 110, 0.14), transparent 70%),
-    var(--bg);
+  background: var(--bg);
 }
 .stage canvas {
   display: block;
-}
-
-/* Light shafts: a few blurred, slowly breathing wedges falling from the top, blended with
-   screen so they only brighten. Pure CSS, no cost on the GPU scene. */
-.shafts {
-  position: fixed;
-  inset: 0;
-  pointer-events: none;
-  overflow: hidden;
-  mix-blend-mode: screen;
-}
-.shafts span {
-  position: absolute;
-  top: -20vh;
-  left: 50%;
-  width: var(--w);
-  height: 130vh;
-  margin-left: calc(var(--w) / -2);
-  transform-origin: 50% 0;
-  transform: translateX(var(--x)) rotate(var(--a));
-  background: linear-gradient(to bottom, rgba(214, 226, 255, var(--o)) 0%, rgba(214, 226, 255, 0) 75%);
-  filter: blur(18px);
-  animation: breathe var(--t) ease-in-out infinite alternate;
-}
-.shafts span:nth-child(1) { --w: 9vw;  --x: -4vw;  --a: -6deg;  --o: 0.16; --t: 11s; }
-.shafts span:nth-child(2) { --w: 5vw;  --x: 6vw;   --a: -2deg;  --o: 0.22; --t: 9s;  animation-delay: -3s; }
-.shafts span:nth-child(3) { --w: 14vw; --x: 14vw;  --a: 5deg;   --o: 0.10; --t: 14s; animation-delay: -6s; }
-.shafts span:nth-child(4) { --w: 4vw;  --x: -14vw; --a: -11deg; --o: 0.18; --t: 12s; animation-delay: -8s; }
-.shafts span:nth-child(5) { --w: 22vw; --x: 2vw;   --a: 1deg;   --o: 0.07; --t: 17s; animation-delay: -2s; }
-@keyframes breathe {
-  from { opacity: 0.55; }
-  to   { opacity: 1; }
-}
-@media (prefers-reduced-motion: reduce) {
-  .shafts span { animation: none; }
 }
 
 /* Overlay ------------------------------------------------------------------ */
@@ -180,6 +142,38 @@ body {
   color: var(--faint);
   font-variant-numeric: tabular-nums;
   font-size: 11px;
+}
+.toggle .swatch {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--c);
+}
+.toggle[aria-pressed="false"] .swatch {
+  opacity: 0.35;
+}
+
+/* Colour-mode switch: two segments, the active one lifted. */
+.switch {
+  display: inline-flex;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.03);
+}
+.switch button {
+  all: unset;
+  cursor: pointer;
+  padding: 3px 10px;
+  border-radius: 4px;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+}
+.switch button[aria-pressed="true"] {
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--text);
 }
 
 .legend {

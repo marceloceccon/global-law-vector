@@ -9,7 +9,9 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+import time
 from collections.abc import Sequence
+from pathlib import Path
 
 from . import __version__
 from .config import Config
@@ -378,6 +380,35 @@ def cmd_reset(cfg: Config, args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_project(cfg: Config, args: argparse.Namespace) -> int:
+    from .project import UmapParams, project
+
+    try:
+        import numpy  # noqa: F401
+        import umap  # noqa: F401
+    except ImportError:
+        print("projection needs UMAP: pip install 'global-law-vector[project]'", file=sys.stderr)
+        return 1
+    out = Path(args.out).expanduser() if args.out else cfg.cache_dir / "projection.json"
+    try:
+        store = _open_store(cfg)
+    except Exception as exc:  # noqa: BLE001
+        print(f"database unreachable: {exc}", file=sys.stderr)
+        return 1
+    params = UmapParams(n_neighbors=args.neighbors, min_dist=args.min_dist,
+                        metric=args.metric, seed=args.seed)
+    t0 = time.monotonic()
+    try:
+        project(store, out, points=args.points, fit=args.fit, params=params,
+                progress=lambda m: print(f"[{time.monotonic() - t0:6.0f}s] {m}", file=sys.stderr))
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        store.close()
+    return 0
+
+
 def cmd_tui(cfg: Config, args: argparse.Namespace) -> int:
     try:
         from .tui.app import run_tui
@@ -445,6 +476,19 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("reset", help="drop the index schema")
     s.add_argument("--yes", action="store_true")
     s.set_defaults(func=cmd_reset)
+
+    s = sub.add_parser("project",
+                       help="cache a 3-D UMAP layout of a sample of the index for web/")
+    s.add_argument("--points", type=int, default=40_000, help="sample size (default 40000)")
+    s.add_argument("--fit", type=int, default=20_000,
+                   help="fit UMAP on this many, place the rest with transform (default 20000)")
+    s.add_argument("--neighbors", type=int, default=20, help="UMAP n_neighbors (default 20)")
+    s.add_argument("--min-dist", type=float, default=0.1, help="UMAP min_dist (default 0.1)")
+    s.add_argument("--metric", default="cosine", help="UMAP metric (default cosine)")
+    s.add_argument("--seed", type=int, default=42)
+    s.add_argument("--out", metavar="PATH",
+                   help="where to write (default $GLV_CACHE_DIR/projection.json)")
+    s.set_defaults(func=cmd_project)
 
     s = sub.add_parser("tui", help="interactive terminal UI")
     s.set_defaults(func=cmd_tui)
