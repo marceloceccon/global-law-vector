@@ -1,24 +1,29 @@
 "use client";
 
 /**
- * The cloud: one BufferGeometry, drawn twice with a soft-disc shader under modest additive
- * blending, so density still reads as brightness without burning to white.
+ * The cloud: one BufferGeometry, drawn twice with a soft-disc shader under additive blending,
+ * so overlapping points read as brightness without burning to white.
  *
  *  - core   small discs in the point's colour
  *  - halo   a wider, very faint disc whose strength follows local density (lib/spatial.ts)
  *
+ * Colours stay in sRGB from the legend hex to the screen: the shader writes them as they are
+ * and does no colour-space conversion, so a point is drawn in exactly its swatch's colour
+ * (blending then adds in display space, which is what the eye compares anyway).
+ *
  * Both colour encodings travel as vertex attributes (country and domain); a uniform mixes
  * between them, so switching modes is instant and uploads nothing. Visibility is a per-vertex
- * attribute rewritten when a country is toggled. A faint unit cube marks the extent the
- * coordinates were normalised to (99th-percentile radius = 1) for orientation; the axes
- * themselves carry no meaning in a UMAP layout. No picking, no post-processing.
+ * attribute rewritten when a toggle changes. A faint cube marks the extent the coordinates
+ * were normalised to (99th-percentile radius = 1) for orientation; the axes themselves carry
+ * no meaning in a UMAP layout. No picking, no post-processing.
  */
 import { OrbitControls } from "@react-three/drei";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { useEffect, useMemo } from "react";
 import * as THREE from "three";
 import type { PointsPayload } from "@/lib/points";
-import { analyse } from "@/lib/spatial";
+import { lcg } from "@/lib/random";
+import { localDensity } from "@/lib/spatial";
 
 export type ColorMode = "country" | "domain";
 
@@ -56,36 +61,38 @@ const FRAG = /* glsl */ `
     float r2 = dot(c, c);
     if (r2 > 1.0) discard;
     float a = exp(-r2 * 3.0) * (1.0 - r2 * r2) * uAlpha * vFade;
+    // Premultiplied: with premultipliedAlpha the additive blend is ONE, ONE, so alpha
+    // is applied exactly once.
     gl_FragColor = vec4(vColor * a, a);
   }
 `;
 
-const NEUTRAL = new THREE.Color("#7a8294").convertSRGBToLinear();
-
-function prng(seed: number) {
-  let s = seed >>> 0;
-  return () => ((s = (Math.imul(s, 1103515245) + 12345) >>> 0) / 4294967296);
+/** "#rrggbb" as sRGB components in [0, 1], deliberately bypassing three's colour management. */
+function srgb(hex: string): [number, number, number] {
+  const v = Number.parseInt(hex.slice(1), 16);
+  return [((v >> 16) & 255) / 255, ((v >> 8) & 255) / 255, (v & 255) / 255];
 }
+
+const NEUTRAL = srgb("#7a8294");
 
 function buildGeometry(data: PointsPayload): THREE.BufferGeometry {
   const n = data.sample;
   const positions = Float32Array.from(data.xyz);
-  const { density } = analyse(positions, n, 1);
+  const density = localDensity(positions, n);
 
-  const countryPalette = data.countries.map((c) => new THREE.Color(c.color).convertSRGBToLinear());
-  const domainPalette = data.domains.map((d) => new THREE.Color(d.color).convertSRGBToLinear());
-  const rnd = prng(1234567);
+  const countryPalette = data.countries.map((c) => srgb(c.color));
+  const domainPalette = data.domains.map((d) => srgb(d.color));
+  const rand = lcg(1234567);
   const byCountry = new Float32Array(n * 3);
   const byDomain = new Float32Array(n * 3);
   const sizes = new Float32Array(n);
-  const tmp = new THREE.Color();
   for (let i = 0; i < n; i++) {
-    tmp.copy(countryPalette[data.country[i]]);
-    byCountry.set([tmp.r, tmp.g, tmp.b], i * 3);
+    byCountry.set(countryPalette[data.country[i]], i * 3);
     // Uncertain domain assignments fade towards neutral; confident ones carry the hue.
-    tmp.copy(NEUTRAL).lerp(domainPalette[data.domain[i]], 0.3 + 0.7 * data.confidence[i]);
-    byDomain.set([tmp.r, tmp.g, tmp.b], i * 3);
-    sizes[i] = 0.75 + rnd() * 0.5;
+    const hue = domainPalette[data.domain[i]];
+    const t = 0.3 + 0.7 * data.confidence[i];
+    for (let c = 0; c < 3; c++) byDomain[i * 3 + c] = NEUTRAL[c] + (hue[c] - NEUTRAL[c]) * t;
+    sizes[i] = 0.75 + rand() * 0.5;
   }
   const g = new THREE.BufferGeometry();
   g.setAttribute("position", new THREE.BufferAttribute(positions, 3));
@@ -112,31 +119,37 @@ function Layer({
   densityWeight: number;
 }) {
   const dpr = useThree((s) => s.viewport.dpr);
+  // Created once; props only ever change uniforms, so the eased colour mode is never reset.
   const material = useMemo(
     () =>
       new THREE.ShaderMaterial({
         vertexShader: VERT,
         fragmentShader: FRAG,
         uniforms: {
-          uMode: { value: 0 },
+          uMode: { value: mode === "domain" ? 1 : 0 },
           uSize: { value: size },
           uAlpha: { value: alpha },
           uDensityWeight: { value: densityWeight },
           uPixelRatio: { value: dpr },
         },
         transparent: true,
+        premultipliedAlpha: true,
         depthWrite: false,
         depthTest: false,
         blending: THREE.AdditiveBlending,
       }),
-    [size, alpha, densityWeight, dpr],
+    [], // deliberately empty: later prop values reach the uniforms in useFrame below
   );
   useEffect(() => () => material.dispose(), [material]);
-  // Ease between the two encodings over a third of a second.
   useFrame((_, dt) => {
-    const u = material.uniforms.uMode;
+    const u = material.uniforms;
+    u.uSize.value = size;
+    u.uAlpha.value = alpha;
+    u.uDensityWeight.value = densityWeight;
+    u.uPixelRatio.value = dpr;
+    // Ease between the two encodings over about a third of a second.
     const target = mode === "domain" ? 1 : 0;
-    u.value += (target - u.value) * Math.min(1, dt * 8);
+    u.uMode.value += (target - u.uMode.value) * Math.min(1, dt * 8);
   });
   return <points geometry={geometry} material={material} frustumCulled={false} />;
 }
@@ -169,8 +182,8 @@ function Cloud({ data, visible, mode }: { data: PointsPayload; visible: Uint8Arr
   }, [geometry, visible]);
   return (
     <>
-      <Layer geometry={geometry} mode={mode} size={16} alpha={0.05} densityWeight={0.8} />
-      <Layer geometry={geometry} mode={mode} size={3.4} alpha={0.85} densityWeight={0} />
+      <Layer geometry={geometry} mode={mode} size={16} alpha={0.008} densityWeight={0.8} />
+      <Layer geometry={geometry} mode={mode} size={3.4} alpha={0.35} densityWeight={0} />
     </>
   );
 }

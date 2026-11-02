@@ -8,8 +8,8 @@
  * average embedding of chunks whose text mentions them stands in for the phrase vector.
  *
  * Colours are the dark-mode categorical slots of the dataviz reference palette, validated
- * for colour-vision deficiency against this page's background (#04060d) with the palette
- * validator; the legend lists them in this order, which is the order the check assumes.
+ * for colour-vision deficiency in this order (the order the legend uses) against #04060d,
+ * a slightly darker background than the page's current #0b0d12.
  */
 export type Domain = {
   id: string;

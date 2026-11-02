@@ -1,7 +1,7 @@
 /**
  * Minimal client for the text-embeddings-inference server the Python indexer used, needed
  * only to embed the eight domain phrases. Mirrors global_law_vector.embed: bearer key,
- * explicit User-Agent (the RunPod proxy's Cloudflare rejects anonymous clients), `truncate`.
+ * explicit User-Agent (some hosted proxies reject anonymous clients), `truncate`.
  * Returns null instead of throwing so the caller can fall back to keyword centroids.
  */
 import { env } from "./env";
@@ -10,7 +10,7 @@ export async function embedQueries(texts: string[], timeoutMs = 20_000): Promise
   const e = env();
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
-    "User-Agent": "global-law-vector-web/0.1.0",
+    "User-Agent": "global-law-vector-web",
   };
   if (e.teiApiKey) headers.Authorization = `Bearer ${e.teiApiKey}`;
   const ctl = new AbortController();

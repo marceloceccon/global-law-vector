@@ -1,16 +1,17 @@
 /**
- * Projection from 768 dimensions to 3: principal component analysis fitted on a few thousand
- * sampled embeddings, computed here with orthogonal (subspace) iteration.
+ * The fallback projection, used when no UMAP layout has been computed (see lib/points.ts):
+ * principal component analysis from 768 dimensions to 3, fitted on a few thousand sampled
+ * embeddings with orthogonal (subspace) iteration.
  *
- * Why PCA and not UMAP/t-SNE: it is linear, so the three axes are plain vectors and Postgres
- * can project every sampled chunk with one inner product per axis (`embedding <#> axis`).
- * Only the fit sample's vectors ever leave the database. It is also deterministic and takes
- * well under a second for 2,000 × 768. The trade-off is that PCA keeps global structure
- * (which countries and languages sit where) rather than local clusters.
+ * PCA is linear, so the three axes are plain vectors and Postgres can project every sampled
+ * chunk with one inner product per axis (`embedding <#> axis`); only the fit sample's vectors
+ * leave the database. It keeps the global shape of the space but compresses local clusters,
+ * which is why `glv project` and UMAP are preferred.
  *
- * Cost of a fit: k·iters passes over the fit matrix, each 2·N·D multiply-adds, so about
+ * Cost of a fit: k · iters passes over the fit matrix, each 2 · N · D multiply-adds, about
  * 2000 × 768 × 2 × 3 × 40 ≈ 370 M flops. No covariance matrix is formed.
  */
+import { lcg } from "./random";
 
 export type Projection = {
   mean: Float64Array;
@@ -27,15 +28,6 @@ export function parseVector(text: string): Float32Array {
   const out = new Float32Array(parts.length);
   for (let i = 0; i < parts.length; i++) out[i] = +parts[i];
   return out;
-}
-
-/** Small deterministic PRNG so the same sample always yields the same axes. */
-function lcg(seed: number): () => number {
-  let s = seed >>> 0;
-  return () => {
-    s = (Math.imul(s, 1664525) + 1013904223) >>> 0;
-    return s / 4294967296;
-  };
 }
 
 export function fitPCA(rows: Float32Array[], k = 3, iters = 40): Projection {

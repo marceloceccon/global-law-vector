@@ -13,7 +13,8 @@
  * z-scored over the sample so a broad phrase cannot claim half the cloud. The best domain
  * wins; the margin to the runner-up becomes a confidence that fades uncertain points.
  *
- * The payload is cached in-process for CACHE_TTL_MS; a new projection file invalidates it.
+ * The payload is cached in-process for CACHE_TTL_MS (one entry; see getPoints). A new
+ * projection file invalidates it on the next request.
  */
 import { countryColor } from "./colors";
 import { pool, vectorCast, vectorLiteral } from "./db";
@@ -22,6 +23,7 @@ import { embedQueries } from "./embed";
 import { env } from "./env";
 import { dot, fitPCA, parseVector, type Projection } from "./pca";
 import { loadProjection, type ProjectionFile } from "./projection";
+import { lcg, shuffle } from "./random";
 
 const CACHE_TTL_MS = 15 * 60_000;
 
@@ -31,7 +33,6 @@ export type PointsPayload = {
   sample: number;
   model: string | null;
   countries: { name: string; total: number; sampled: number; color: string }[];
-  corpora: string[];
   domains: { id: string; label: string; color: string }[];
   domainSource: "tei" | "keyword-centroids";
   projection:
@@ -40,7 +41,6 @@ export type PointsPayload = {
   /** Parallel arrays, length `sample`; xyz has 3 entries per point. */
   xyz: number[];
   country: number[];
-  corpus: number[];
   domain: number[];
   confidence: number[];
 };
@@ -56,14 +56,13 @@ type DomainVectors = {
   centered: boolean;
 };
 
-declare global {
-  // eslint-disable-next-line no-var
-  var __glvCache: {
-    domains?: Promise<DomainVectors>;
-    payload?: Map<string, { at: number; value: Promise<PointsPayload> }>;
-  };
-}
-const cache = (globalThis.__glvCache ??= {});
+type CacheEntry = { key: string; at: number; settled: boolean; value: Promise<PointsPayload> };
+
+// Kept on globalThis so Next's dev-mode hot reloads keep the cache.
+const g = globalThis as typeof globalThis & {
+  __glvCache?: { domains?: Promise<DomainVectors>; payload?: CacheEntry };
+};
+const cache = (g.__glvCache ??= {});
 
 function t(name: string): string {
   return `${env().schema}.${name}`;
@@ -109,12 +108,7 @@ async function sampleIds(n: number): Promise<Sampled> {
     remaining -= take;
   });
   // Shuffle so the PCA fit prefix is as balanced as the whole.
-  let seed = 42;
-  for (let i = ids.length - 1; i > 0; i--) {
-    seed = (Math.imul(seed, 1103515245) + 12345) >>> 0;
-    const j = seed % (i + 1);
-    [ids[i], ids[j]] = [ids[j], ids[i]];
-  }
+  shuffle(ids, lcg(42));
   return { ids, totals };
 }
 
@@ -214,9 +208,12 @@ type Layout = {
   meta: PointsPayload["projection"];
 };
 
-async function layout(n: number, file: string): Promise<Layout> {
-  const proj = loadProjection(file);
+async function layout(n: number, proj: ProjectionFile | null): Promise<Layout> {
+  const e = env();
   if (proj) {
+    if (proj.dims !== e.dims) {
+      throw new Error(`the projection was made from ${proj.dims}-dimensional embeddings but GLV_DIMS is ${e.dims}`);
+    }
     const totals = new Map(Object.entries(proj.country_totals));
     return {
       ids: proj.ids,
@@ -226,8 +223,7 @@ async function layout(n: number, file: string): Promise<Layout> {
       meta: { method: "umap", fitSize: proj.params.fit, createdAt: proj.created_at, params: proj.params },
     };
   }
-  console.warn(`[glv-web] no projection at ${file}; falling back to PCA (run \`glv project\`)`);
-  const e = env();
+  console.warn(`[glv-web] no projection at ${e.projectionFile}; falling back to PCA (run \`glv project\`)`);
   const sampled = await sampleIds(n);
   const pca = await fitProjection(sampled.ids.slice(0, e.fitSize));
   return {
@@ -239,9 +235,12 @@ async function layout(n: number, file: string): Promise<Layout> {
   };
 }
 
-async function build(n: number, file: string): Promise<PointsPayload> {
+/** One row of the build query: `p0..p2` are PCA coordinates, `s0..s7` domain similarities. */
+type Row = { id: string; country: string } & Record<`p${number}` | `s${number}`, number>;
+
+async function build(n: number, proj: ProjectionFile | null): Promise<PointsPayload> {
   const e = env();
-  const lay = await layout(n, file);
+  const lay = await layout(n, proj);
   // The PCA fit's mean doubles as the sample mean the centroid fallback needs; on the UMAP
   // path it is fitted lazily, only if TEI turns out to be unreachable.
   const meanOf = async () => (lay.pca ?? (lay.pca = await fitProjection(lay.ids.slice(0, e.fitSize)))).mean;
@@ -262,17 +261,17 @@ async function build(n: number, file: string): Promise<PointsPayload> {
   });
   const simOffset = domains.vectors.map((v) => (domains.centered ? dot(lay.pca!.mean, v) : 0));
   const sql = `
-    SELECT ch.id, co.country, co.path AS corpus${axisCols.length ? ", " + axisCols.join(", ") : ""}, ${simCols.join(", ")}
+    SELECT ch.id, co.country${axisCols.length ? ", " + axisCols.join(", ") : ""}, ${simCols.join(", ")}
     FROM ${t("chunk")} ch
     JOIN ${t("document")} d  ON d.id = ch.document_id
     JOIN ${t("corpus")}   co ON co.id = d.corpus_id
     WHERE ch.id = ANY($1::bigint[])`;
-  const { rows } = await pool().query<Record<string, string | number>>(sql, params);
+  const { rows } = await pool().query<Row>(sql, params);
 
   // Keep the layout's order (the cached xyz is aligned with it); chunks deleted since the
   // projection was made simply drop out.
   const byId = new Map(rows.map((r) => [Number(r.id), r]));
-  const kept: { r: Record<string, string | number>; i: number }[] = [];
+  const kept: { r: Row; i: number }[] = [];
   lay.ids.forEach((id, i) => {
     const r = byId.get(id);
     if (r) kept.push({ r, i });
@@ -281,12 +280,9 @@ async function build(n: number, file: string): Promise<PointsPayload> {
   const meanOffset = lay.pca && !lay.xyz ? lay.pca.axes.map((a) => dot(lay.pca!.mean, a)) : [];
   const scale = lay.pca && !lay.xyz ? 1 / (2.5 * lay.pca.spread[0]) : 1; // PCA cloud roughly in [-1, 1]³
   const countryIndex = new Map<string, number>();
-  const corpusIndex = new Map<string, number>();
   const countryNames: string[] = [];
-  const corpora: string[] = [];
   const xyz: number[] = [];
   const country: number[] = [];
-  const corpus: number[] = [];
   const domain: number[] = [];
   const margins: number[] = [];
 
@@ -308,17 +304,11 @@ async function build(n: number, file: string): Promise<PointsPayload> {
   }
 
   kept.forEach(({ r, i: li }, p) => {
-    let ci = countryIndex.get(r.country as string);
+    let ci = countryIndex.get(r.country);
     if (ci === undefined) {
       ci = countryNames.length;
-      countryIndex.set(r.country as string, ci);
-      countryNames.push(r.country as string);
-    }
-    let ki = corpusIndex.get(r.corpus as string);
-    if (ki === undefined) {
-      ki = corpora.length;
-      corpusIndex.set(r.corpus as string, ki);
-      corpora.push(r.corpus as string);
+      countryIndex.set(r.country, ci);
+      countryNames.push(r.country);
     }
     if (lay.xyz) xyz.push(lay.xyz[li * 3], lay.xyz[li * 3 + 1], lay.xyz[li * 3 + 2]);
     else for (let a = 0; a < 3; a++) xyz.push(round((Number(r[`p${a}`]) - meanOffset[a]) * scale));
@@ -329,7 +319,6 @@ async function build(n: number, file: string): Promise<PointsPayload> {
       else if (z > second) second = z;
     }
     country.push(ci);
-    corpus.push(ki);
     domain.push(best);
     margins.push(bestZ - second);
   });
@@ -353,20 +342,17 @@ async function build(n: number, file: string): Promise<PointsPayload> {
     color: countryColor(i),
   }));
 
-  const model = loadProjection(file)?.model ?? null;
   return {
     generatedAt: new Date().toISOString(),
     totalChunks: [...lay.totals.values()].reduce((a, b) => a + b, 0),
     sample: kept.length,
-    model,
+    model: proj?.model ?? null,
     countries,
-    corpora,
     domains: DOMAINS.map(({ id, label, color }) => ({ id, label, color })),
     domainSource: domains.source,
     projection: lay.meta,
     xyz,
     country,
-    corpus,
     domain,
     confidence,
   };
@@ -374,22 +360,26 @@ async function build(n: number, file: string): Promise<PointsPayload> {
 
 const round = (v: number) => Math.round(v * 1000) / 1000;
 
+/**
+ * The payload, built at most once at a time. One entry is cached: the layout file's
+ * `created_at` (or the PCA sample size) is its key, so a new `glv project` run is served on
+ * the next request without a restart, and `?n=` cannot fill memory with payloads.
+ * `refresh` rebuilds unless a build is already running, which is then shared.
+ */
 export function getPoints(n: number, refresh = false): Promise<PointsPayload> {
-  const e = env();
-  // The cache key carries the projection file's mtime, so a new `glv project` run is served
-  // on the next request without a restart.
-  let stamp = "pca";
-  try {
-    stamp = String(loadProjection(e.projectionFile)?.created_at ?? "pca");
-  } catch (err) {
-    console.warn(`[glv-web] ${(err as Error).message}`);
+  const proj = loadProjection(env().projectionFile);
+  const key = proj ? `umap:${proj.created_at}` : `pca:${n}`;
+  const hit = cache.payload;
+  if (hit && hit.key === key && (!hit.settled || (!refresh && Date.now() - hit.at < CACHE_TTL_MS))) {
+    return hit.value;
   }
-  const key = `${n}:${stamp}`;
-  const map = (cache.payload ??= new Map());
-  const hit = map.get(key);
-  if (hit && !refresh && Date.now() - hit.at < CACHE_TTL_MS) return hit.value;
-  const value = build(n, e.projectionFile);
-  map.set(key, { at: Date.now(), value });
-  value.catch(() => map.delete(key));
-  return value;
+  const entry: CacheEntry = { key, at: Date.now(), settled: false, value: build(n, proj) };
+  cache.payload = entry;
+  entry.value.then(
+    () => (entry.settled = true),
+    () => {
+      if (cache.payload === entry) cache.payload = undefined;
+    },
+  );
+  return entry.value;
 }

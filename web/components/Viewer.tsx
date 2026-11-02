@@ -26,6 +26,9 @@ export default function Viewer() {
     (async () => {
       try {
         const res = await fetch("/api/points", { signal: ctl.signal });
+        if (!res.headers.get("content-type")?.includes("application/json")) {
+          throw new Error(`the server answered ${res.status} ${res.statusText} without a JSON body`);
+        }
         const body = await res.json();
         if (!res.ok) throw Object.assign(new Error(body.error ?? res.statusText), { hint: body.hint });
         const payload = body as PointsPayload;

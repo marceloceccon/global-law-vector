@@ -4,7 +4,8 @@
  * Location: `GLV_PROJECTION`, else `$GLV_CACHE_DIR/projection.json`, else
  * `~/.cache/global-law-vector/projection.json`, the same default the Python side writes to.
  * Re-read whenever the file's mtime changes, so re-running `glv project` is picked up by the
- * next request without restarting the server.
+ * next request without restarting the server. The type documents the whole file format; the
+ * viewer reads `ids`, `xyz`, `country_totals`, `params`, `created_at`, `model` and `dims`.
  */
 import fs from "node:fs";
 import os from "node:os";
@@ -51,9 +52,14 @@ export function loadProjection(file: string): ProjectionFile | null {
   }
   if (cached && cached.file === file && cached.mtimeMs === stat.mtimeMs) return cached.value;
   const value = JSON.parse(fs.readFileSync(file, "utf8")) as ProjectionFile;
-  if (value.version !== 1 || value.method !== "umap" || value.xyz.length !== value.sample * 3) {
-    throw new Error(`${file} is not a projection file this viewer understands`);
-  }
+  const consistent =
+    value.version === 1 &&
+    value.method === "umap" &&
+    Array.isArray(value.ids) &&
+    value.ids.length === value.sample &&
+    Array.isArray(value.xyz) &&
+    value.xyz.length === value.sample * 3;
+  if (!consistent) throw new Error(`${file} is not a projection file this viewer understands; rerun \`glv project\``);
   cached = { mtimeMs: stat.mtimeMs, file, value };
   return value;
 }

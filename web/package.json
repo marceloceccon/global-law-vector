@@ -2,11 +2,16 @@
   "name": "global-law-vector-web",
   "private": true,
   "version": "0.1.0",
-  "description": "Live 3D point cloud of the global-law-vector embeddings index",
+  "description": "3-D point cloud of the global-law-vector embedding index",
+  "license": "CC0-1.0",
+  "engines": {
+    "node": ">=20.9"
+  },
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start",
+    "postbuild": "node -e \"require('fs').cpSync('.next/static', '.next/standalone/.next/static', { recursive: true })\"",
+    "start": "node .next/standalone/server.js",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
