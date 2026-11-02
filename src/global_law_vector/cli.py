@@ -322,7 +322,13 @@ def cmd_index(cfg: Config, args: argparse.Namespace) -> int:
     store = _open_store(cfg)
     try:
         store.migrate()
-        store.ensure_meta(cfg.model, tok.name, cfg.chunk_tokens, cfg.document_prefix)
+        store.ensure_meta(
+            cfg.model,
+            tok.name,
+            cfg.chunk_tokens,
+            cfg.document_prefix,
+            "exact" if tok.exact else "heuristic",
+        )
         measured = store.get_meta().get("chunks_per_second")
         if measured:
             cfg.chunks_per_second = float(measured)
@@ -331,7 +337,9 @@ def cmd_index(cfg: Config, args: argparse.Namespace) -> int:
             pl = plan_corpus(tree, c, store, max_files)
             plans.append(pl)
             print(
-                f"{c.path}: {len(pl.to_index):,} to index, {pl.unchanged:,} unchanged, "
+                f"{c.path}: up to date at {(c.commit_sha or '')[:10]}"
+                if pl.up_to_date
+                else f"{c.path}: {len(pl.to_index):,} to index, {pl.unchanged:,} unchanged, "
                 f"{len(pl.to_delete):,} to delete"
             )
 

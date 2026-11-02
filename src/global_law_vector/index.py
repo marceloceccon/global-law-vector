@@ -19,7 +19,7 @@ from pathlib import Path
 
 from .chunk import Chunk, chunk_document, embedding_input
 from .config import Config
-from .discover import Corpus, Tree, iter_files
+from .discover import Corpus, Tree, changed_files, iter_files
 from .embed import TEIClient
 from .parse import Document, content_sha, parse_document
 from .store import Store
@@ -43,6 +43,10 @@ class CorpusPlan:
     to_index: list[str]  # relative paths, new or changed
     to_delete: list[str]
     unchanged: int
+    # Fully indexed at the commit pinned now: nothing to read, write or mark.
+    up_to_date: bool = False
+    # Only part of the corpus was considered (--max-files), so it must not be marked complete.
+    limited: bool = False
 
     @property
     def total_files(self) -> int:
@@ -77,18 +81,36 @@ ProgressCallback = Callable[[Progress], None]
 def plan_corpus(tree: Tree, corpus: Corpus, store: Store | None, max_files: int = 0) -> CorpusPlan:
     """Diff the corpus on disk against what the store holds for it.
 
+    The cost follows what changed, not the size of the corpus:
+
+    - completed at the commit pinned now: nothing is listed or read;
+    - completed at an older commit: `git diff` between the two commits names the changed
+      files, and only those are read and hashed;
+    - otherwise (first run, interrupted run, git unavailable): every stored file is hashed.
+
     `max_files` limits what is indexed (a quick trial run), never what counts as deleted: a
     stored document is deleted only when its file is gone from the whole corpus.
     """
+    state = store.corpus_state(corpus.path) if store is not None else None
+    if (
+        state is not None
+        and state.completed
+        and corpus.commit_sha is not None
+        and state.commit_sha == corpus.commit_sha
+    ):
+        return CorpusPlan(corpus, state.id, [], [], state.file_count or 0, up_to_date=True)
+
     on_disk = {f.as_posix(): f for f in iter_files(tree.root, corpus)}
     stored: dict[str, str] = {}
-    corpus_id: int | None = None
-    if store is not None:
-        corpus_id = store.corpus_id(corpus.path)
-        if corpus_id is not None:
-            stored = store.document_hashes(corpus_id)
+    changed: set[str] | None = None
+    if store is not None and state is not None:
+        stored = store.document_hashes(state.id)
+        # A completed run means every stored file reflects state.commit_sha exactly.
+        if state.completed and state.commit_sha and corpus.commit_sha:
+            changed = changed_files(tree.root, corpus, state.commit_sha, corpus.commit_sha)
     considered = list(on_disk.items())
-    if max_files:
+    limited = bool(max_files) and len(considered) > max_files
+    if limited:
         considered = considered[:max_files]
     to_index: list[str] = []
     unchanged = 0
@@ -96,13 +118,16 @@ def plan_corpus(tree: Tree, corpus: Corpus, store: Store | None, max_files: int 
         old = stored.get(rel)
         if old is None:
             to_index.append(rel)
-            continue
-        if old == content_sha((tree.root / p).read_bytes()):
+        elif changed is not None and rel not in changed:
+            unchanged += 1
+        elif old == content_sha((tree.root / p).read_bytes()):
             unchanged += 1
         else:
             to_index.append(rel)
     to_delete = sorted(set(stored) - set(on_disk))
-    return CorpusPlan(corpus, corpus_id, to_index, to_delete, unchanged)
+    return CorpusPlan(
+        corpus, state.id if state else None, to_index, to_delete, unchanged, limited=limited
+    )
 
 
 class Indexer:
@@ -124,6 +149,11 @@ class Indexer:
         self.progress_cb = progress or (lambda p: None)
         self.stop = stop or (lambda: False)
         self.progress = Progress()
+        if not tokenizer.exact:
+            log.warning(
+                "token counts are estimates (the model's tokenizer is unavailable); the "
+                "embeddings server will cut any chunk that turns out longer than the model's limit"
+            )
 
     def _group_size(self) -> int:
         return max(self.cfg.batch_size * self.cfg.workers * 2, MIN_GROUP_CHUNKS)
@@ -136,7 +166,8 @@ class Indexer:
             if self.stop():
                 break
             p.corpus = pl.corpus.path
-            self._run_corpus(pl)
+            if not pl.up_to_date:
+                self._run_corpus(pl)
             p.corpus_done += 1
             self.progress_cb(p)
         if p.chunks_done and p.elapsed > MIN_SECONDS_TO_RECORD_RATE:
@@ -151,7 +182,7 @@ class Indexer:
             n = self.store.delete_documents(cid, pl.to_delete)
             log.info("%s: removed %d deleted documents", pl.corpus.path, n)
         if not pl.to_index:
-            if not self.stop():
+            if not self.stop() and not pl.limited:
                 self.store.complete_corpus(cid)
             return
 
@@ -201,7 +232,7 @@ class Indexer:
             writer.join()
         if errors:
             raise errors[0]
-        if not self.stop():
+        if not self.stop() and not pl.limited:
             self.store.complete_corpus(cid)
 
     def _produce(
@@ -236,7 +267,11 @@ class Indexer:
     def _embed(self, group: Group) -> list[list[float]]:
         prefix = self.cfg.document_prefix
         texts = [embedding_input(doc, ch, prefix) for doc, chunks in group for ch in chunks]
-        return self.client.embed_many(texts, self.cfg.batch_size, self.cfg.workers)
+        # Exact counts guarantee every input fits, so an overflow is a bug to surface, not
+        # text to drop. Estimated counts cannot guarantee it, so the server may truncate.
+        return self.client.embed_many(
+            texts, self.cfg.batch_size, self.cfg.workers, truncate=not self.tok.exact
+        )
 
     def _write(
         self, corpus_id: int, inp: queue.Queue, errors: list, abort: threading.Event

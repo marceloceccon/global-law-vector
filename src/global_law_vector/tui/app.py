@@ -344,7 +344,13 @@ class RunScreen(Screen):
             say(f"tokenizer: {tok.name}")
             with Store(cfg.database_url, cfg.schema, cfg.vector_type, cfg.dims) as store:
                 store.migrate()
-                store.ensure_meta(cfg.model, tok.name, cfg.chunk_tokens)
+                store.ensure_meta(
+                    cfg.model,
+                    tok.name,
+                    cfg.chunk_tokens,
+                    cfg.document_prefix,
+                    "exact" if tok.exact else "heuristic",
+                )
                 plans = []
                 for c in corpora:
                     if self._stop.is_set():
@@ -352,8 +358,10 @@ class RunScreen(Screen):
                     pl = plan_corpus(st.tree, c, store, st.selection.max_files_per_corpus)
                     plans.append(pl)
                     say(
-                        f"{c.path}: {len(pl.to_index):,} to index, {pl.unchanged:,} unchanged, "
-                        f"{len(pl.to_delete):,} to delete"
+                        f"{c.path}: up to date at {(c.commit_sha or '')[:10]}"
+                        if pl.up_to_date
+                        else f"{c.path}: {len(pl.to_index):,} to index, "
+                        f"{pl.unchanged:,} unchanged, {len(pl.to_delete):,} to delete"
                     )
                 indexer = Indexer(
                     cfg,

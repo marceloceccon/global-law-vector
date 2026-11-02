@@ -127,13 +127,16 @@ def test_empty_plan_completes_without_embedding(tree, server):
 
 
 class PlannedStore:
-    """Just enough of Store for plan_corpus: one corpus already holding every file."""
+    """Just enough of Store for plan_corpus: one corpus holding the given files."""
 
-    def __init__(self, hashes: dict[str, str]) -> None:
+    def __init__(self, hashes: dict[str, str], commit=None, completed=False) -> None:
+        from global_law_vector.store import CorpusState
+
         self.hashes = hashes
+        self.state = CorpusState(1, commit, completed, len(hashes))
 
-    def corpus_id(self, path):
-        return 1
+    def corpus_state(self, path):
+        return self.state
 
     def document_hashes(self, corpus_id):
         return self.hashes
@@ -189,3 +192,80 @@ def test_interrupt_while_embedding_stops_every_thread(tree, server):
     threading.Thread(target=run, daemon=True).start()
     assert done.wait(10), "the indexer hung after an interrupt"
     assert isinstance(outcome[0], KeyboardInterrupt)
+
+
+def _git(cwd, *args):
+    import subprocess
+
+    subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@example.org", *args],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+    )
+
+
+def _corpus_repo(tmp_path, files: dict[str, str]):
+    """A corpus checkout that is its own git repository, as a global-law submodule is."""
+    from global_law_vector.discover import Corpus, Tree
+
+    corpus = Corpus.from_path("malta/national/acts")
+    root = tmp_path / corpus.path
+    root.mkdir(parents=True)
+    _git(root, "init", "-q")
+    for name, text in files.items():
+        (root / name).write_text(text)
+    _git(root, "add", ".")
+    _git(root, "commit", "-q", "-m", "v1")
+    return Tree(root=tmp_path, corpora=[corpus]), corpus, root
+
+
+def _head(root) -> str:
+    import subprocess
+
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=root, check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+
+def test_corpus_complete_at_the_pinned_commit_is_not_read(tmp_path):
+    tree, corpus, root = _corpus_repo(tmp_path, {"a.md": "# A\n\nOne.\n"})
+    corpus.commit_sha = _head(root)
+    (root / "a.md").unlink()  # would be planned as a deletion if the corpus were read
+    plan = plan_corpus(tree, corpus, PlannedStore({"x": "y"}, corpus.commit_sha, completed=True))
+    assert plan.up_to_date and plan.to_index == [] and plan.to_delete == []
+
+
+def test_new_commit_reads_only_the_files_git_reports_changed(tmp_path):
+    tree, corpus, root = _corpus_repo(
+        tmp_path, {"a.md": "# A\n\nOne.\n", "b.md": "# B\n\nTwo.\n", "c.md": "# C\n"}
+    )
+    old = _head(root)
+    (root / "b.md").write_text("# B\n\nTwo, amended.\n")
+    (root / "c.md").unlink()
+    (root / "d.md").write_text("# D\n\nNew.\n")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "v2")
+    corpus.commit_sha = _head(root)
+    rel = {n: f"{corpus.path}/{n}" for n in ("a.md", "b.md", "c.md", "d.md")}
+    # Every stored hash is wrong: a file that is hashed shows up as changed. Only b.md may be.
+    stored = {rel["a.md"]: "stale", rel["b.md"]: "stale", rel["c.md"]: "stale"}
+    plan = plan_corpus(tree, corpus, PlannedStore(stored, old, completed=True))
+    assert sorted(plan.to_index) == [rel["b.md"], rel["d.md"]]
+    assert plan.to_delete == [rel["c.md"]] and plan.unchanged == 1
+
+
+def test_interrupted_run_rehashes_everything(tmp_path):
+    tree, corpus, root = _corpus_repo(tmp_path, {"a.md": "# A\n\nOne.\n"})
+    corpus.commit_sha = _head(root)
+    stored = {f"{corpus.path}/a.md": "stale"}
+    plan = plan_corpus(tree, corpus, PlannedStore(stored, corpus.commit_sha, completed=False))
+    assert plan.to_index == [f"{corpus.path}/a.md"] and not plan.up_to_date
+
+
+def test_limited_run_does_not_mark_the_corpus_complete(tree, server):
+    store = FakeStore()
+    full = _plans(tree)[0]
+    limited = CorpusPlan(full.corpus, None, full.to_index, [], 0, limited=True)
+    Indexer(_cfg(tree), tree, store, TEIClient(server), HeuristicTokenizer()).run([limited])
+    assert store.writes >= 1 and store.completed == []

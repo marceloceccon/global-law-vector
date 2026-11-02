@@ -8,13 +8,17 @@ tolerates all of them and never fails on a law file: at worst the title comes fr
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
+import textwrap
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import Any
 
 _HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
 _FRONT_MATTER = re.compile(r"\A---[ \t]*\r?\n(.*?)\r?\n---[ \t]*\r?\n?", re.DOTALL)
+log = logging.getLogger(__name__)
+
 _KV = re.compile(r"^([A-Za-z0-9_\-.]+)\s*:\s*(.*)$")
 _CITATION_KEYS = ("citation", "citace", "cite", "citacao", "citação", "zitat", "ref")
 
@@ -38,21 +42,50 @@ class Document:
 def parse_front_matter(text: str) -> tuple[dict[str, Any], str]:
     """Split a leading `---` block into a dict and return (dict, rest).
 
-    The corpora use flat `key: value` front matter (Czechia: citace, nazev, druh, eli). This
-    reads that subset of YAML: scalars, quoted strings, and simple `[a, b]` lists. Anything
-    nested is kept as its raw text. No YAML library is needed.
+    The corpora use flat `key: value` front matter (Czechia: citace, nazev, druh, eli); a
+    survey of the checked-out corpora on 2026-11-02 found nothing else. This reads that subset
+    of YAML without a YAML library: scalars, quoted strings, `[a, b]` lists, block lists
+    (`- item` lines under a key), and block scalars (`|` keeps line breaks, `>` folds them).
+    Anything else nested under a key is kept as its raw, dedented text.
     """
     m = _FRONT_MATTER.match(text)
     if not m:
         return {}, text
     data: dict[str, Any] = {}
-    for line in m.group(1).splitlines():
-        kv = _KV.match(line)
+    lines = m.group(1).splitlines()
+    i = 0
+    while i < len(lines):
+        kv = _KV.match(lines[i])
+        i += 1
         if not kv:
             continue
-        key, raw = kv.group(1), kv.group(2).strip()
-        data[key] = _scalar(raw)
+        block: list[str] = []
+        while i < len(lines) and (
+            lines[i][:1] in (" ", "\t") or lines[i].startswith("- ") or not lines[i].strip()
+        ):
+            block.append(lines[i])
+            i += 1
+        while block and not block[-1].strip():
+            block.pop()
+        data[kv.group(1)] = _value(kv.group(2).strip(), block)
     return data, text[m.end() :]
+
+
+def _value(raw: str, block: list[str]) -> Any:
+    """A key's value from the rest of its line and the indented lines under it."""
+    if raw[:1] in ("|", ">") and raw.rstrip("+-") in ("|", ">"):
+        body = textwrap.dedent("\n".join(block))
+        if raw.startswith(">"):  # folded: single line breaks become spaces
+            body = "\n".join(" ".join(p.split("\n")) for p in body.split("\n\n"))
+        return body + "\n" if raw.endswith("+") else body
+    if not block:
+        return _scalar(raw)
+    items = [line.strip() for line in block if line.strip()]
+    if raw == "" and all(item.startswith("- ") or item == "-" for item in items):
+        return [_scalar(item[1:].strip()) for item in items]
+    if raw == "":
+        return textwrap.dedent("\n".join(block))  # a nested mapping, kept as text
+    return " ".join([raw, *items])  # a plain scalar continued on the next lines
 
 
 def _scalar(raw: str) -> Any:
@@ -96,7 +129,15 @@ def title_from_path(path: str, corpus_path: str) -> str:
 
 def parse_document(path: str, corpus_path: str, raw: bytes) -> Document:
     """Parse a provision file. `path` is relative to the root; `raw` is the file's bytes."""
-    text = raw.decode("utf-8", errors="replace")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        text = raw.decode("utf-8", errors="replace")
+        log.warning(
+            "%s is not valid UTF-8; %d undecodable sequences replaced with U+FFFD",
+            path,
+            text.count("\ufffd"),
+        )
     if text.startswith("\ufeff"):  # byte-order mark
         text = text[1:]
     front, body = parse_front_matter(text)

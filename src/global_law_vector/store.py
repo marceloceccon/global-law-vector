@@ -54,6 +54,16 @@ class CorpusRow:
 
 
 @dataclass(slots=True)
+class CorpusState:
+    """What planning needs to know about a corpus already in the index."""
+
+    id: int
+    commit_sha: str | None
+    completed: bool
+    file_count: int | None
+
+
+@dataclass(slots=True)
 class Hit:
     score: float
     corpus_path: str
@@ -144,13 +154,18 @@ class Store:
         self.conn.commit()
 
     def ensure_meta(
-        self, model: str, tokenizer: str, chunk_tokens: int, document_prefix: str = ""
+        self,
+        model: str,
+        tokenizer: str,
+        chunk_tokens: int,
+        document_prefix: str = "",
+        token_counting: str = "exact",
     ) -> None:
         """Record the index settings on first use; refuse to mix settings afterwards.
 
-        Everything that changes a stored vector is compared: model, dimensions, vector type,
-        chunker version, chunk size and document prefix. The tokenizer is recorded but not
-        compared, because it only moves chunk boundaries when a provision is split.
+        Everything that changes a stored vector or where chunks are cut is compared: model,
+        dimensions, vector type, chunker version, chunk size, document prefix, and whether
+        token counts are exact or estimated. The tokenizer's name is recorded for reference.
         """
         expected = {
             "model": model,
@@ -159,6 +174,7 @@ class Store:
             "chunker_version": CHUNKER_VERSION,
             "chunk_tokens": str(chunk_tokens),
             "document_prefix": document_prefix,
+            "token_counting": token_counting,
         }
         current = self.get_meta()
         if not current:
@@ -168,16 +184,12 @@ class Store:
                 created_at=datetime.now().isoformat(timespec="seconds"),
             )
             return
-        # Indexes made before document_prefix was recorded used no prefix.
-        current.setdefault("document_prefix", "")
         for k, v in expected.items():
             if current.get(k) != v:
                 raise IndexMismatch(
                     f"index was built with {k}={current.get(k)!r}, configured {v!r}; "
                     "use another schema (GLV_SCHEMA) or reset the index"
                 )
-        if "document_prefix" not in self.get_meta():
-            self.set_meta(document_prefix=document_prefix)
 
     # --- corpora ---
 
@@ -191,7 +203,7 @@ class Store:
                     " ON CONFLICT (path) DO UPDATE SET code = EXCLUDED.code, name = EXCLUDED.name,"
                     " language = EXCLUDED.language, commit_sha = EXCLUDED.commit_sha,"
                     " record_to = EXCLUDED.record_to, file_count = EXCLUDED.file_count,"
-                    " indexed_at = now(), completed_at = NULL RETURNING id"
+                    " indexed_at = now(), completed_at = NULL, chunk_count = NULL RETURNING id"
                 ).format(self._t("corpus")),
                 (
                     corpus.path,
@@ -210,23 +222,32 @@ class Store:
         return cid
 
     def complete_corpus(self, corpus_id: int) -> None:
+        """Mark a corpus fully indexed and record its chunk count, which search uses to
+        decide between an exact scan and the HNSW index."""
         with self.conn.cursor() as cur:
             cur.execute(
                 sql.SQL(
-                    "UPDATE {} SET completed_at = now(), indexed_at = now() WHERE id = %s"
-                ).format(self._t("corpus")),
-                (corpus_id,),
+                    "UPDATE {corpus} SET completed_at = now(), indexed_at = now(),"
+                    " chunk_count = (SELECT count(*) FROM {chunk} k"
+                    "   JOIN {doc} d ON d.id = k.document_id WHERE d.corpus_id = %s)"
+                    " WHERE id = %s"
+                ).format(corpus=self._t("corpus"), chunk=self._t("chunk"), doc=self._t("document")),
+                (corpus_id, corpus_id),
             )
         self.conn.commit()
 
-    def corpus_id(self, path: str) -> int | None:
+    def corpus_state(self, path: str) -> CorpusState | None:
         with self.conn.cursor() as cur:
             cur.execute(
-                sql.SQL("SELECT id FROM {} WHERE path = %s").format(self._t("corpus")), (path,)
+                sql.SQL(
+                    "SELECT id, commit_sha, completed_at IS NOT NULL, file_count"
+                    " FROM {} WHERE path = %s"
+                ).format(self._t("corpus")),
+                (path,),
             )
             row = cur.fetchone()
         self.conn.rollback()
-        return row[0] if row else None
+        return CorpusState(*row) if row else None
 
     def corpus_rows(self) -> dict[str, CorpusRow]:
         """Every indexed corpus with its document and chunk counts (a full count: slow on
@@ -415,10 +436,7 @@ class Store:
             "{} k JOIN {} d ON d.id = k.document_id JOIN {} c ON c.id = d.corpus_id"
         ).format(chunk, doc, corpus)
         distance = sql.SQL("k.embedding <=> %s::{}").format(sql.SQL(self.vector_type))
-        exact = bool(where) and (
-            self._count_at_most(tables, filt, params, EXACT_SEARCH_MAX_CHUNKS + 1)
-            <= EXACT_SEARCH_MAX_CHUNKS
-        )
+        exact = bool(where) and self._filter_size(tables, filt, params) <= EXACT_SEARCH_MAX_CHUNKS
         if exact:
             # Distances of every matching chunk; without ORDER BY here the planner cannot
             # reach for the HNSW index.
@@ -452,15 +470,32 @@ class Store:
         self.conn.rollback()  # read-only; also ends the SET LOCALs
         return hits
 
-    def _count_at_most(
-        self, tables: sql.Composable, filt: sql.Composable, params: Sequence[object], limit: int
+    def _filter_size(
+        self, tables: sql.Composable, filt: sql.Composable, params: Sequence[object]
     ) -> int:
-        """min(rows matching the filter, limit), stopping early on large filters."""
-        q = sql.SQL("SELECT count(*) FROM (SELECT 1 FROM {} WHERE {} LIMIT %s) s").format(
-            tables, filt
-        )
+        """How many chunks a filter matches, at least as far as the exact-scan threshold.
+
+        Completed corpora carry their chunk count, so this is usually one small query on the
+        corpus table. While any matching corpus lacks a count (a run in progress, or an index
+        built before counts were recorded), the chunks are counted, stopping at the threshold.
+        """
         with self.conn.cursor() as cur:
-            cur.execute(q, [*params, limit])
+            cur.execute(
+                sql.SQL(
+                    "SELECT bool_and(chunk_count IS NOT NULL), coalesce(sum(chunk_count), 0)"
+                    " FROM {} c WHERE {}"
+                ).format(self._t("corpus"), filt),
+                params,
+            )
+            known, total = cur.fetchone()
+            if known or known is None:  # None: no corpus matches, so no chunk does
+                return int(total)
+            cur.execute(
+                sql.SQL("SELECT count(*) FROM (SELECT 1 FROM {} WHERE {} LIMIT %s) s").format(
+                    tables, filt
+                ),
+                [*params, EXACT_SEARCH_MAX_CHUNKS + 1],
+            )
             return int(cur.fetchone()[0])
 
     # --- sampling, for `glv project` ---

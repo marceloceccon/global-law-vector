@@ -85,3 +85,45 @@ def test_first_heading_fallbacks():
 def test_bom_and_title_from_front_matter():
     d = parse_document("x/y/z/a.md", "x/y/z", "﻿---\ntitle: From FM\n---\nbody only".encode())
     assert d.title == "From FM" and d.body == "body only"
+
+
+def test_front_matter_block_syntax():
+    from global_law_vector.parse import parse_front_matter
+
+    text = (
+        "---\n"
+        "nazev: Zákon o obcích\n"
+        "tags:\n"
+        "  - obce\n"
+        "  - samospráva\n"
+        "extent:\n"
+        "note: |\n"
+        "  First line.\n"
+        "  Second line.\n"
+        "summary: >\n"
+        "  Folded\n"
+        "  into one.\n"
+        "source:\n"
+        "  url: https://example.org\n"
+        "  retrieved: 2026-10-29\n"
+        "---\n"
+        "# § 1\n"
+    )
+    fm, rest = parse_front_matter(text)
+    assert fm["nazev"] == "Zákon o obcích"
+    assert fm["tags"] == ["obce", "samospráva"]
+    assert fm["extent"] == ""
+    assert fm["note"] == "First line.\nSecond line."
+    assert fm["summary"] == "Folded into one."
+    assert fm["source"] == "url: https://example.org\nretrieved: 2026-10-29"
+    assert rest == "# § 1\n"
+
+
+def test_invalid_utf8_is_replaced_and_logged(caplog):
+    from global_law_vector.parse import parse_document
+
+    raw = "# § 1\n\nPlatí od 1. ledna.".encode() + b"\xff\xfe"
+    with caplog.at_level("WARNING"):
+        doc = parse_document("c/l/x/f.md", "c/l/x", raw)
+    assert "�" in doc.body
+    assert "not valid UTF-8" in caplog.text and "c/l/x/f.md" in caplog.text

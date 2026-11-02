@@ -1,8 +1,13 @@
 """Token counting for the chunker.
 
 The exact tokenizer is the model's (Hugging Face `tokenizers`, loaded from a local file or the
-hub). When it is not installed or cannot be fetched, a heuristic stands in: it over-estimates
-slightly, which keeps chunks under the limit. The database records which one built the index.
+hub). When it is not installed or cannot be fetched, a heuristic stands in. The index records
+whether its token counts are exact or estimated and refuses to mix the two, because the
+chunk boundaries differ.
+
+A `tokenizer.json` carries the settings the model was trained with, including truncation (512
+tokens for arctic-embed-m-v2.0) and padding. Both are switched off here: a counter that stops
+at 512 would make every document look short enough to stay in one piece.
 """
 
 from __future__ import annotations
@@ -21,6 +26,7 @@ _CJK = re.compile("[\u3040-\u9fff\uac00-\ud7af]")
 
 class Tokenizer(Protocol):
     name: str
+    exact: bool
 
     def count(self, text: str) -> int: ...
 
@@ -29,6 +35,7 @@ class HeuristicTokenizer:
     """About 1.3 subword tokens per word for Latin-script legal text, more for CJK."""
 
     name = "heuristic"
+    exact = False
 
     def count(self, text: str) -> int:
         if not text:
@@ -40,8 +47,11 @@ class HeuristicTokenizer:
 
 class HFTokenizer:
     name: str
+    exact = True
 
     def __init__(self, tok, name: str) -> None:
+        tok.no_truncation()
+        tok.no_padding()
         self._tok = tok
         self.name = name
 
@@ -49,10 +59,10 @@ class HFTokenizer:
         return len(self._tok.encode(text, add_special_tokens=True).ids)
 
     @classmethod
-    def from_file(cls, path: Path) -> HFTokenizer:
+    def from_file(cls, path: Path, name: str | None = None) -> HFTokenizer:
         from tokenizers import Tokenizer as _T
 
-        return cls(_T.from_file(str(path)), f"file:{path.name}")
+        return cls(_T.from_file(str(path)), name or f"file:{path.name}")
 
     @classmethod
     def from_hub(cls, model: str) -> HFTokenizer:
@@ -76,13 +86,14 @@ def load_tokenizer(
     Order: an explicit file, then a copy cached under `cache_dir` from an earlier run, then the
     hub (saving the copy, so later runs make no network request), then the heuristic.
     """
+    name = None
     if path is None and cache_dir is not None:
         cached = cached_tokenizer_path(cache_dir, model)
         if cached.is_file():
-            path = cached
+            path, name = cached, model  # the hub's tokenizer, saved by an earlier run
     if path is not None:
         try:
-            return HFTokenizer.from_file(path)
+            return HFTokenizer.from_file(path, name)
         except Exception as exc:  # noqa: BLE001 - any failure falls back
             log.warning("tokenizer file %s unusable (%s); using heuristic", path, exc)
             return HeuristicTokenizer()

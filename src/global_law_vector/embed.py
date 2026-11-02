@@ -137,14 +137,22 @@ class TEIClient:
         return out
 
     def embed_many(
-        self, texts: Sequence[str], batch_size: int = 32, workers: int = 4
+        self,
+        texts: Sequence[str],
+        batch_size: int = 32,
+        workers: int = 4,
+        truncate: bool = True,
     ) -> list[list[float]]:
-        """Embed any number of texts in parallel batches, preserving order."""
+        """Embed any number of texts in parallel batches, preserving order.
+
+        With `truncate=False` the server rejects an input above the model's limit instead of
+        silently cutting it, which is what an indexer with exact token counts wants.
+        """
         batches = [texts[i : i + batch_size] for i in range(0, len(texts), batch_size)]
         if len(batches) <= 1 or workers <= 1:
-            return [v for b in batches for v in self.embed(b)]
+            return [v for b in batches for v in self.embed(b, truncate)]
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            results = list(pool.map(self.embed, batches))
+            results = list(pool.map(lambda b: self.embed(b, truncate), batches))
         return [v for b in results for v in b]
 
 

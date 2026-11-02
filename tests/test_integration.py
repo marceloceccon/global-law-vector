@@ -55,7 +55,7 @@ def test_index_then_search(cfg, tree):
     try:
         store.reset()
         store.migrate()
-        store.ensure_meta(cfg.model, "heuristic", cfg.chunk_tokens)
+        store.ensure_meta(cfg.model, "heuristic", cfg.chunk_tokens, token_counting="heuristic")
         plans = [plan_corpus(tree, c, store) for c in tree.corpora]
         assert sum(len(p.to_index) for p in plans) == 7
         p = Indexer(cfg, tree, store, client, HeuristicTokenizer()).run(plans)

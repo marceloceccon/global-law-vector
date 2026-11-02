@@ -106,6 +106,35 @@ def _gitlinks_from_git(root: Path) -> dict[str, str] | None:
     return links
 
 
+def changed_files(root: Path, corpus: Corpus, old: str, new: str) -> set[str] | None:
+    """Paths (relative to the tree root) that differ between two commits of a corpus, from
+    `git diff` inside its submodule; None when git cannot tell, for instance because the old
+    commit is not in the local clone. Reads only the git object store, never the work tree."""
+    try:
+        proc = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(root / corpus.path),
+                "diff",
+                "--name-only",
+                "--no-renames",
+                "-z",
+                old,
+                new,
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=600,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    return {f"{corpus.path}/{p}" for p in proc.stdout.split("\0") if p}
+
+
 def _gitlinks_from_gitmodules(root: Path) -> dict[str, str | None]:
     """{path: None} for every submodule in .gitmodules (the commit is not knowable from it)."""
     links: dict[str, str | None] = {}

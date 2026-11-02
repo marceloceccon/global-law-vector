@@ -14,6 +14,20 @@ jobs:
     strategy:
       matrix:
         python: ["3.11", "3.13"]
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: glv
+          POSTGRES_PASSWORD: glv
+          POSTGRES_DB: glv
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U glv" --health-interval 5s --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://glv:glv@localhost:5432/glv
+      GLV_REQUIRE_DB: "1"  # tests/test_store.py must run here, not skip
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -23,7 +37,8 @@ jobs:
       - run: pip install -e '.[dev]'
       - run: ruff check src tests
       - run: ruff format --check src tests
-      # The integration test skips itself without the embeddings server and the database.
+      # test_store.py runs against the service above. test_integration.py also needs an
+      # embeddings server and skips itself here.
       - run: pytest -q
 
   web:
