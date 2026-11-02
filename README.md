@@ -8,6 +8,34 @@ the vectors and their provenance in PostgreSQL with
 anywhere, are about X", in any language, and every hit can be read back from global-law at the
 exact commit it was indexed from.
 
+Comparing how countries regulate the same thing is slow work: each country has its own
+language, terminology and structure. Asked in English, without naming a country, the index
+finds the reporting duties of Argentina's anti-money-laundering law, Germany's Money Laundering
+Act and a French ministerial order side by side:
+
+```
+$ glv search "obligation to report suspicious transactions to the financial intelligence unit" --top 8 --short
+ 1. 0.624  argentina/national/acts/ley-25246/art-017.md
+    Art. 17
+ 2. 0.580  argentina/national/acts/ley-25246/art-021.md
+    Art. 21
+ 3. 0.569  argentina/national/acts/ley-25246/art-014.md
+    Art. 14
+ 4. 0.554  germany/bund/acts/gwg_2017/0030.md
+    § 30 Analyse von Meldungen und Informationen
+ 5. 0.553  argentina/chaco/acts/ley-1529-b/art-058.md
+    ley-1529-b / art-058
+ 6. 0.552  france/national/acts/textes/arrete/2004/arrete-2004-11-12-441606/315-2.md
+    Article 315-2
+ 7. 0.534  argentina/national/acts/ley-25246/art-019.md
+    Art. 19
+ 8. 0.531  germany/bund/acts/gwg_2017/0043.md
+    § 43 Meldepflicht von Verpflichteten, Verordnungsermächtigung
+```
+
+The index is plain PostgreSQL, so the same search is a SQL query away from any application or
+from a language model's retrieval tool.
+
 ![A 40,000-chunk sample of the index drawn by the web viewer, coloured by country](docs/images/viewer-by-country.png)
 
 *The web viewer in [`web/`](web/README.md) shows a country-balanced sample of 40,000 chunks
@@ -153,10 +181,10 @@ One schema, `global_law` by default, holds four tables:
 
 | Table | One row per | Main columns |
 | --- | --- | --- |
-| `corpus` | indexed corpus | `path` (`germany/bund/acts`), `country`, `language`, `commit_sha` (the submodule commit indexed), `completed_at` (null while a run is in progress) |
-| `document` | provision file | `path` (relative to the global-law root), `title`, `citation`, `front_matter` (jsonb), `content_sha` (sha256 of the file) |
+| `corpus` | indexed corpus | `path` (`germany/bund/acts`), `country`, `language`, `commit_sha` (the submodule commit indexed), `completed_at` (null while a run is in progress), `chunk_count` |
+| `document` | provision file | `path` (relative to the global-law root), `title`, `citation`, `front_matter` (jsonb), `content_sha` (sha256 of the file), `in_force_date` (reserved for indexing past versions; not filled yet) |
 | `chunk` | piece of a provision | `ordinal`, `heading_path` (`Chapter II > § 4`), `text`, `token_count`, `embedding` (`halfvec(768)`) |
-| `index_meta` | setting | `model`, `dims`, `vector_type`, `chunker_version`, `chunk_tokens`, `document_prefix`, `chunks_per_second` |
+| `index_meta` | setting | `model`, `dims`, `vector_type`, `chunker_version`, `chunk_tokens`, `document_prefix`, `token_counting`, `chunks_per_second` |
 
 The full definition is in [`src/global_law_vector/sql/001_schema.sql`](src/global_law_vector/sql/001_schema.sql).
 `chunk.embedding` has an HNSW index with cosine distance (`chunk_embedding_hnsw`).
@@ -171,7 +199,8 @@ provision as it was indexed, even after the corpus has moved on.
 
 **Size.** At 768 dimensions a `halfvec` takes 1.5 KB per chunk, and the HNSW index is of a
 similar size. The ten-country index behind the screenshot holds 1.6 million chunks. The whole
-tree would be about 5 million.
+tree has 4.5 million files and would give several times as many chunks, because corpora that
+store a whole act per file split heavily: Czechia's first 3,000 files gave 19 chunks each.
 
 ## Querying the index from your own code
 
@@ -223,13 +252,27 @@ discover → select → plan → parse → chunk → embed (TEI) → store (pgve
   with metadata from its `manifest.json`. Nothing in the tree is ever written to.
 - **Select** turns countries and corpora into a list of corpus paths and prices it from cached
   file counts.
-- **Plan** compares each corpus on disk with the database by file hash. Only new and changed
-  files are indexed, and only documents whose files are gone are deleted.
+- **Plan** compares each corpus with the database. A corpus completed at the commit pinned
+  now is skipped without reading a file. If its commit moved, `git diff` between the two
+  commits names the changed files, and only those are read and hashed. After an interrupted
+  run, or where git cannot answer, every file is hashed. Only new and changed files are
+  indexed, and only documents whose files are gone are deleted.
 - **Parse** reads front matter, title, citation and body, and skips files such as `README.md`
   that are not law.
-- **Chunk** keeps a provision whole when it fits the 1,024-token target. A longer one is split
-  on its headings, then on paragraphs, with the heading path kept for each chunk. More than
-  99.9 % of files fit in one chunk.
+- **Chunk** keeps a provision whole when it fits the 1,024-token target, counted with the
+  model's own tokenizer. A longer one is split on its headings, then its paragraphs, then
+  sentences and words, and each chunk keeps its heading path. No chunk exceeds the target, and
+  chunks do not overlap: statutes are split along their own structure. How much splitting
+  happens depends on how a corpus stores its law. Measured on 2026-11-02 by parsing and
+  chunking every file with the model's tokenizer, nothing embedded:
+
+  | Corpus | Files | Chunks | Files split | Files above the model's 8,192-token limit | Median file |
+  | --- | ---: | ---: | ---: | ---: | ---: |
+  | Malta, one provision per file | 66,864 | 75,650 | 4.6 % | 251 | 141 tokens |
+  | Czechia, one act per file (first 3,000 files) | 3,000 | 56,104 | 58 % | 471 | 1,402 tokens |
+  | Germany, one section per file | 113,478 | 136,096 | 5.2 % | 279 | 166 tokens |
+  | Brazil, one article per file | 14,809 | 15,010 | 1.0 % | 0 | 86 tokens |
+
 - **Embed** sends batches to TEI on a thread pool, with retries and back-off.
 - **Store** writes each group of documents and their chunks in one transaction, chunks through
   `COPY`.
@@ -243,6 +286,12 @@ was stored. A corpus counts as indexed only when every file of it has been writt
 The HNSW index is built once, after the first run, because building it before a bulk load is
 far slower. Later runs update rows under the existing index. `--no-build-index` defers the
 build when several runs follow each other.
+
+A changed provision is replaced by deleting its rows and inserting new ones. After a refresh
+that replaced a large share of a corpus, `VACUUM (ANALYZE)` on the `chunk` and `document`
+tables reclaims the dead rows and repairs the HNSW graph around them. If recall ever seems to
+have degraded after many refreshes, `REINDEX INDEX CONCURRENTLY global_law.chunk_embedding_hnsw`
+rebuilds the graph without blocking searches.
 
 A parallel build keeps its graph in shared memory. Docker gives a container 64 MB of `/dev/shm`
 unless told otherwise, and the build then fails with "could not resize shared memory segment …
@@ -268,6 +317,9 @@ or none of them. `glv` avoids this in two ways:
 - A wider filter uses the HNSW index with pgvector 0.8's iterative scan, which keeps searching
   until enough rows pass the filter.
 
+The size of a filter comes from the chunk count each corpus records when its run completes, so
+choosing between the two costs one small query.
+
 Measured on that index with three queries, each run with no filter and with five single-country
 filters, the top ten matched an exact scan in 16 of the 18 searches and shared nine of ten
 results in the other two. Plain HNSW returned fewer than ten results in 12 of the 15 filtered
@@ -276,8 +328,8 @@ searches, and none at all in 10 of them.
 ## Throughput and a rented GPU
 
 Embedding is the only slow stage. The default model on a six-core desktop CPU embeds about 1.5
-chunks per second, which is twelve hours for Malta's 67,000 files and over a month for the
-whole tree.
+chunks per second, which is about 14 hours for Malta's 75,650 chunks and over a month for
+the whole tree.
 
 Because the embeddings server speaks plain HTTP, it can run on a rented GPU while the files and
 the database stay local:
@@ -364,4 +416,14 @@ model and the decisions behind them.
 
 ## Licence
 
-[CC0 1.0](LICENSE), like global-law: no rights reserved.
+The code is released under [CC0 1.0](LICENSE): no rights reserved.
+
+That covers this repository only. global-law's own repository is also CC0, but the law text
+lives in each country's repository under that repository's terms. An index built with `glv`
+contains that text in `chunk.text`, so publishing an index dump, a hosted search or the text
+of results is subject to the terms of the corpora it holds.
+
+The default embedding model,
+[Snowflake/snowflake-arctic-embed-m-v2.0](https://huggingface.co/Snowflake/snowflake-arctic-embed-m-v2.0),
+is published by Snowflake under the Apache 2.0 licence. `glv` calls it through an embeddings
+server and does not redistribute it.

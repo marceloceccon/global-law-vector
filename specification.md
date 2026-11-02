@@ -260,7 +260,8 @@ CREATE TABLE global_law.corpus (
   record_to     date,
   file_count    int,
   indexed_at    timestamptz NOT NULL,       -- last touched
-  completed_at  timestamptz                  -- NULL while a run is in progress ("partial")
+  completed_at  timestamptz,                -- NULL while a run is in progress ("partial")
+  chunk_count   bigint                       -- set on completion; sizes filtered searches
 );
 
 CREATE TABLE global_law.document (
@@ -272,7 +273,7 @@ CREATE TABLE global_law.document (
   front_matter  jsonb,
   content_sha   text NOT NULL,               -- sha256 of file bytes; skip when unchanged
   byte_size     int NOT NULL,
-  in_force_date date,                        -- optional in v1 (needs git log per file)
+  in_force_date date,                        -- reserved; not filled in v1 (decision 5)
   UNIQUE (corpus_id, path)
 );
 
@@ -294,13 +295,13 @@ CREATE TABLE global_law.index_meta (         -- model id, dims, max tokens, chun
 
 -- after the bulk load:
 CREATE INDEX chunk_embedding_hnsw ON global_law.chunk USING hnsw (embedding halfvec_cosine_ops);
-CREATE INDEX chunk_document_idx   ON global_law.chunk (document_id);
-CREATE INDEX document_corpus_idx  ON global_law.document (corpus_id);
+-- document(corpus_id) and chunk(document_id) lookups use the UNIQUE constraints' indexes.
 ```
 
-Sizing at 768 dimensions for the whole tree: about 5 million chunks × 1.5 KB (`halfvec`) ≈ 7.5 GB
-of vectors plus a comparable HNSW index; `vector` (float32) doubles both. A typical selection is
-far smaller.
+Sizing at 768 dimensions: 1.5 KB per chunk (`halfvec`), so 1.5 GB of vectors per million
+chunks, plus an HNSW index of comparable size; `vector` (float32) doubles both. The whole tree's
+4.5 million files give at least as many chunks and, with corpora that store whole acts per file
+(section 8.2), several times more. A typical selection is far smaller.
 
 ## 8. Pipeline and performance
 
@@ -329,17 +330,31 @@ Docker network cannot see it. Either run the utility on the host, attach the dev
 
 ### 8.2 Chunking under an 8k-token limit
 
-The input limit no longer forces splitting: 99.9% of files fit in one chunk. Splitting is kept
-for retrieval quality, not for the model. Default target is 1,024 tokens per chunk, configurable,
-splitting on headings then paragraphs; a whole act of 200 KB (Czechia) becomes a few dozen chunks
-with its heading path, which is what a search result should land on.
+Splitting serves retrieval quality as much as the model's limit: a hit should land on the part
+of an act that answers the question. The default target is 1,024 tokens per chunk,
+configurable, splitting on headings, then paragraphs, then sentences and words, with the
+heading path kept per chunk.
+
+How much that splits depends on the corpus. Measured on 2026-11-02 with the model's tokenizer
+(the parser and chunker run over every file, nothing embedded):
+
+| Corpus | Files | Chunks | Files split | Files above 8,192 tokens | Median file |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Malta, one provision per file | 66,864 | 75,650 | 4.6 % | 251 | 141 tokens |
+| Czechia, one act per file (first 3,000) | 3,000 | 56,104 | 58 % | 471 | 1,402 tokens |
+| Germany, one section per file | 113,478 | 136,096 | 5.2 % | 279 | 166 tokens |
+| Brazil, one article per file | 14,809 | 15,010 | 1.0 % | 0 | 86 tokens |
+
+An earlier version of this section said 99.9 % of files fit in one chunk. That figure came
+from a counter that inherited the tokenizer file's 512-token truncation, so no file ever
+looked longer than 512 tokens (fixed in 0.2.0; see CHANGELOG).
 
 ### 8.3 Throughput
 
 - Measured 2026-10-31 on the host (Intel i7-8700K, 6 cores, no GPU, TEI `cpu-latest`): about
-  **1.5 chunks/s** for Malta's provisions (roughly 500 tokens each), i.e. ~750 tokens/s. The
+  **1.5 chunks/s** for Malta's provisions (a median of 141 tokens per file). The
   server's own metrics show it is CPU-bound; more client concurrency only lengthens its queue.
-  At that rate Malta (66,864 files) is ~12 hours, Brazil national (14,809) ~3 hours, and the
+  At that rate Malta (75,650 chunks) is ~14 hours, Brazil national (14,809 files) ~3 hours, and the
   whole tree (4.5 M files) about 35 days: the full tree needs a GPU or a smaller model.
 - Client settings that match a CPU server: 16 chunks per request, 2 concurrent requests, a
   600 s timeout. A request the client abandons is still computed by the server, so timeouts

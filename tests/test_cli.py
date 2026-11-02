@@ -72,7 +72,9 @@ def test_missing_tree_is_an_error(env, monkeypatch, capsys):
 def test_version(capsys):
     with pytest.raises(SystemExit):
         main(["--version"])
-    assert "glv 0.1.0" in capsys.readouterr().out
+    from global_law_vector import __version__
+
+    assert f"glv {__version__}" in capsys.readouterr().out
 
 
 def test_dotenv_does_not_override_environment(env, monkeypatch):
