@@ -71,8 +71,10 @@ HOSTNAME=0.0.0.0 PORT=3000 npm start
 Stop the old server before starting a rebuilt one, or it keeps serving the previous build.
 
 The viewer has no authentication. Anyone who can reach the port can load the sample, which
-holds coordinates, countries and domain labels but no law text, and can ask the server to
-rebuild it. Keep it on a trusted network.
+holds coordinates, countries and domain labels but no law text. Visitors cannot make the server
+rebuild it or change its size, and errors reach them without details. The database user only
+needs `SELECT` on the index schema; a dedicated read-only role is the safer choice for anything
+beyond a trusted network.
 
 `Dockerfile` packages the same server as an image with no sources and no `node_modules`. Its
 header shows how to run it with the database address, the embeddings server and the projection
@@ -82,7 +84,7 @@ file mounted in.
 
 `GET /api/points` returns everything the page draws. The server builds it on the first request,
 in about 1.5 seconds with a projection file. It keeps the result in memory for fifteen minutes,
-or until `glv project` writes a newer file. `?refresh=1` rebuilds it.
+or until `glv project` writes a newer file. The route takes no parameters.
 
 **Sample.** `glv project` draws 40,000 chunks, balanced across countries. Each country gets an
 equal share, and the share of a country with fewer chunks flows to the larger ones. Malta's

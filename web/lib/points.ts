@@ -363,14 +363,14 @@ const round = (v: number) => Math.round(v * 1000) / 1000;
 /**
  * The payload, built at most once at a time. One entry is cached: the layout file's
  * `created_at` (or the PCA sample size) is its key, so a new `glv project` run is served on
- * the next request without a restart, and `?n=` cannot fill memory with payloads.
- * `refresh` rebuilds unless a build is already running, which is then shared.
+ * the next request without a restart. Otherwise the entry is rebuilt after CACHE_TTL_MS, or
+ * after a failed build.
  */
-export function getPoints(n: number, refresh = false): Promise<PointsPayload> {
+export function getPoints(n: number): Promise<PointsPayload> {
   const proj = loadProjection(env().projectionFile);
   const key = proj ? `umap:${proj.created_at}` : `pca:${n}`;
   const hit = cache.payload;
-  if (hit && hit.key === key && (!hit.settled || (!refresh && Date.now() - hit.at < CACHE_TTL_MS))) {
+  if (hit && hit.key === key && (!hit.settled || Date.now() - hit.at < CACHE_TTL_MS)) {
     return hit.value;
   }
   const entry: CacheEntry = { key, at: Date.now(), settled: false, value: build(n, proj) };

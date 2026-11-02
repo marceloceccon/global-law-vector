@@ -28,8 +28,6 @@ export type Env = {
   projectionFile: string;
 };
 
-export const POINTS_RANGE = { min: 500, max: 60_000 } as const;
-
 function parseDotenv(file: string): Record<string, string> {
   const out: Record<string, string> = {};
   for (const raw of fs.readFileSync(file, "utf8").split(/\r?\n/)) {
@@ -84,7 +82,7 @@ export function env(): Env {
     teiUrl: get("TEI_URL", "http://127.0.0.1:8080").replace(/\/+$/, ""),
     teiApiKey: get("TEI_API_KEY"),
     queryPrefix: get("GLV_QUERY_PREFIX", "query: "),
-    points: integer("GLV_WEB_POINTS", get("GLV_WEB_POINTS", "40000"), POINTS_RANGE.min, POINTS_RANGE.max),
+    points: integer("GLV_WEB_POINTS", get("GLV_WEB_POINTS", "40000"), 500, 60_000),
     fitSize: integer("GLV_WEB_FIT", get("GLV_WEB_FIT", "2000"), 200, 5000),
     projectionFile: projectionPath(get),
   };
