@@ -12,8 +12,11 @@ def _doc(body: str, title: str = "T") -> Document:
 
 
 def test_small_document_is_one_chunk(tok):
-    d = parse_document("germany/bund/acts/solzg/0001.md", "germany/bund/acts",
-                       read("germany/bund/acts/solzg/0001.md"))
+    d = parse_document(
+        "germany/bund/acts/solzg/0001.md",
+        "germany/bund/acts",
+        read("germany/bund/acts/solzg/0001.md"),
+    )
     [c] = chunk_document(d, tok, target_tokens=1024)
     assert c.ordinal == 0 and c.heading_path is None and c.text == d.body
     assert c.token_count == tok.count(d.body)
@@ -26,8 +29,14 @@ def test_empty_body_gives_nothing(tok):
 def test_sections_keep_heading_path(tok):
     para = "word " * 60  # ~80 heuristic tokens
     body = (
-        "# Act\n\nintro paragraph.\n\n## Chapter I\n\n" + para + "\n\n" + para +
-        "\n\n### § 1\n\n" + para + "\n\n## Chapter II\n\n" + para
+        "# Act\n\nintro paragraph.\n\n## Chapter I\n\n"
+        + para
+        + "\n\n"
+        + para
+        + "\n\n### § 1\n\n"
+        + para
+        + "\n\n## Chapter II\n\n"
+        + para
     )
     chunks = chunk_document(_doc(body), tok, target_tokens=100, max_tokens=1000)
     assert [c.ordinal for c in chunks] == list(range(len(chunks)))
@@ -106,3 +115,10 @@ def test_tokenizer_cache_round_trip(tmp_path, monkeypatch):
     assert calls == ["org/model"]  # no second fetch
     assert t2.name.startswith("file:") and t2.count("a b a") == 3
     assert mod.HeuristicTokenizer().name == "heuristic"
+
+
+def test_heuristic_counts_cjk_and_hangul_per_character(tok):
+    latin = tok.count("a b c d")
+    assert tok.count("民法典第一条") >= 6
+    assert tok.count("대한민국헌법") >= 6
+    assert tok.count("大韓民国 憲法") > latin

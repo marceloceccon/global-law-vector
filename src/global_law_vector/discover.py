@@ -86,7 +86,7 @@ def _gitlinks_from_git(root: Path) -> dict[str, str] | None:
     """{path: sha} for every gitlink in the root tree, or None if git cannot answer."""
     try:
         proc = subprocess.run(
-            ["git", "-C", str(root), "ls-tree", "-r", "HEAD"],
+            ["git", "-C", str(root), "ls-tree", "-r", "-z", "HEAD"],
             capture_output=True,
             text=True,
             check=False,
@@ -97,8 +97,8 @@ def _gitlinks_from_git(root: Path) -> dict[str, str] | None:
     if proc.returncode != 0:
         return None
     links: dict[str, str] = {}
-    for line in proc.stdout.splitlines():
-        # "<mode> SP <type> SP <sha> TAB <path>"
+    for line in proc.stdout.split("\0"):
+        # "<mode> SP <type> SP <sha> TAB <path>"; -z keeps non-ASCII paths unquoted
         meta, _, path = line.partition("\t")
         parts = meta.split()
         if len(parts) == 3 and parts[1] == "commit":
@@ -138,8 +138,8 @@ def discover(root: Path) -> Tree:
     manifest = _load_manifest(root)
     corpora: list[Corpus] = []
     for path in sorted(set(links) | set(manifest)):
-        if not (root / path).is_dir():
-            continue
+        if not (root / path).is_dir() or path.count("/") < 2:
+            continue  # not checked out, or not a country/level/corpus path
         c = Corpus.from_path(path)
         c.commit_sha = links.get(path)
         m = manifest.get(path)

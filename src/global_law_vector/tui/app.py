@@ -23,7 +23,7 @@ from ..config import Config
 from ..discover import Corpus, CorpusStats, StatsCache, discover, stats_for
 from ..discover import Tree as LawTree
 from ..index import Progress
-from ..selection import Selection, estimate, human_bytes, human_duration
+from ..selection import CHUNKS_PER_FILE, Selection, estimate, human_bytes, human_duration
 
 log = logging.getLogger(__name__)
 
@@ -114,10 +114,13 @@ class SelectScreen(Screen):
         try:
             from ..store import Store
 
-            with Store(self.state.cfg.database_url, self.state.cfg.schema,
-                       self.state.cfg.vector_type, self.state.cfg.dims) as store:
-                store.migrate()
-                rows = store.corpus_rows()
+            with Store(
+                self.state.cfg.database_url,
+                self.state.cfg.schema,
+                self.state.cfg.vector_type,
+                self.state.cfg.dims,
+            ) as store:
+                rows = store.corpus_rows() if store.schema_exists() else {}
         except Exception as exc:  # noqa: BLE001 - the DB is optional for selecting
             log.info("database not reachable: %s", exc)
             return
@@ -174,8 +177,11 @@ class SelectScreen(Screen):
         files = sum(s.file_count for s in stats)
         size = sum(s.byte_count for s in stats)
         est = estimate({s.path: s for s in stats}, self.state.cfg.chunks_per_second)
-        tail = (f"{files:>9,} files {human_bytes(size):>9}   ~{est.human_time}"
-                if len(stats) == len(corpora) else "scanning…")
+        tail = (
+            f"{files:>9,} files {human_bytes(size):>9}   ~{est.human_time}"
+            if len(stats) == len(corpora)
+            else "scanning…"
+        )
         return f"[{mark}] {country:<36} {len(corpora):>3} corpora {tail}"
 
     def refresh_labels(self) -> None:
@@ -199,9 +205,11 @@ class SelectScreen(Screen):
         stats = {c.path: st.stats[c.path] for c in chosen if c.path in st.stats}
         est = estimate(stats, st.cfg.chunks_per_second, st.selection.max_files_per_corpus)
         missing = len(chosen) - len(stats)
-        text = (f"Selected: {len(chosen)} corpora · {est.files:,} files · {est.human_bytes} · "
-                f"~{est.chunks:,} chunks · est. {est.human_time} at "
-                f"{st.cfg.chunks_per_second:.0f} chunks/s")
+        text = (
+            f"Selected: {len(chosen)} corpora · {est.files:,} files · {est.human_bytes} · "
+            f"~{est.chunks:,} chunks · est. {est.human_time} at "
+            f"{st.cfg.chunks_per_second:.0f} chunks/s"
+        )
         if missing:
             text += f"   ({missing} still scanning)"
         self.query_one("#totals", Static).update(text)
@@ -343,18 +351,28 @@ class RunScreen(Screen):
                         break
                     pl = plan_corpus(st.tree, c, store, st.selection.max_files_per_corpus)
                     plans.append(pl)
-                    say(f"{c.path}: {len(pl.to_index):,} to index, {pl.unchanged:,} unchanged, "
-                        f"{len(pl.to_delete):,} to delete")
-                indexer = Indexer(cfg, st.tree, store, client, tok,
-                                  progress=lambda p: self.post_message(self.Tick(p)),
-                                  stop=self._stop.is_set)
+                    say(
+                        f"{c.path}: {len(pl.to_index):,} to index, {pl.unchanged:,} unchanged, "
+                        f"{len(pl.to_delete):,} to delete"
+                    )
+                indexer = Indexer(
+                    cfg,
+                    st.tree,
+                    store,
+                    client,
+                    tok,
+                    progress=lambda p: self.post_message(self.Tick(p)),
+                    stop=self._stop.is_set,
+                )
                 p = indexer.run(plans)
                 if not self._stop.is_set() and not store.has_hnsw() and p.chunks_done:
                     say("building HNSW index…")
                     store.build_hnsw()
-            text = (f"{'stopped' if self._stop.is_set() else 'done'}: {p.files_done:,} files, "
-                    f"{p.chunks_done:,} chunks in {human_duration(p.elapsed)} "
-                    f"({p.chunks_per_second:.1f} chunks/s)")
+            text = (
+                f"{'stopped' if self._stop.is_set() else 'done'}: {p.files_done:,} files, "
+                f"{p.chunks_done:,} chunks in {human_duration(p.elapsed)} "
+                f"({p.chunks_per_second:.1f} chunks/s)"
+            )
             self.post_message(self.Done(text))
         except Exception as exc:  # noqa: BLE001 - shown to the user
             log.exception("indexing failed")
@@ -366,10 +384,13 @@ class RunScreen(Screen):
         bar = self.query_one("#bar", ProgressBar)
         bar.update(total=max(p.files_total, 1), progress=p.files_done)
         rate = p.chunks_per_second
-        eta = human_duration((p.files_total - p.files_done) * 1.05 / rate) if rate else "…"
+        eta = (
+            human_duration((p.files_total - p.files_done) * CHUNKS_PER_FILE / rate) if rate else "…"
+        )
         self.query_one("#line", Static).update(
             f"{p.corpus}   files {p.files_done:,}/{p.files_total:,}   chunks {p.chunks_done:,}   "
-            f"{rate:.1f} chunks/s   eta {eta}")
+            f"{rate:.1f} chunks/s   eta {eta}"
+        )
 
     @on(Done)
     def _done(self, msg: Done) -> None:
@@ -439,8 +460,9 @@ class SearchScreen(Screen):
         try:
             with Store(cfg.database_url, cfg.schema, cfg.vector_type, cfg.dims) as store:
                 client = TEIClient(cfg.tei_url, timeout=cfg.tei_timeout, api_key=cfg.tei_api_key)
-                hits = search(store, client, q, query_prefix=cfg.query_prefix, top=20,
-                              countries=countries)
+                hits = search(
+                    store, client, q, query_prefix=cfg.query_prefix, top=20, countries=countries
+                )
             self.post_message(self.Results(hits))
         except Exception as exc:  # noqa: BLE001
             self.post_message(self.Results([], error=str(exc)))

@@ -19,7 +19,7 @@ from . import __version__
 
 log = logging.getLogger(__name__)
 
-# Cloudflare-fronted proxies (RunPod's, for one) ban the default "Python-urllib" agent.
+# Some Cloudflare-fronted proxies reject the default "Python-urllib" agent.
 USER_AGENT = f"global-law-vector/{__version__}"
 
 
@@ -36,8 +36,9 @@ class ModelInfo:
 
 
 class TEIClient:
-    def __init__(self, base_url: str, timeout: float = 120.0, retries: int = 5,
-                 api_key: str | None = None) -> None:
+    def __init__(
+        self, base_url: str, timeout: float = 120.0, retries: int = 5, api_key: str | None = None
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.retries = retries
@@ -63,12 +64,17 @@ class TEIClient:
             except urllib.error.HTTPError as exc:
                 body = exc.read().decode(errors="replace")[:300]
                 if exc.code in (401, 403):
-                    who = "the proxy in front of TEI" if "cloudflare" in body.lower() or \
-                        "error code" in body.lower() else "TEI"
-                    hint = ("set TEI_API_KEY" if not self.api_key and who == "TEI"
-                            else f"{who} answered: {body.strip() or exc.reason}")
-                    raise EmbeddingError(
-                        f"{path} refused with HTTP {exc.code}: {hint}") from exc
+                    who = (
+                        "the proxy in front of TEI"
+                        if "cloudflare" in body.lower() or "error code" in body.lower()
+                        else "TEI"
+                    )
+                    hint = (
+                        "set TEI_API_KEY"
+                        if not self.api_key and who == "TEI"
+                        else f"{who} answered: {body.strip() or exc.reason}"
+                    )
+                    raise EmbeddingError(f"{path} refused with HTTP {exc.code}: {hint}") from exc
                 if exc.code in (429, 500, 502, 503, 504) and attempt < self.retries:
                     last = exc
                     log.warning("TEI %s -> %s, retrying in %.0fs: %s", path, exc.code, delay, body)
@@ -82,7 +88,11 @@ class TEIClient:
                     log.warning(
                         "TEI %s gave no answer within %.0fs (the server may still be"
                         " computing it); retrying in %.0fs. Raise GLV_TEI_TIMEOUT or lower"
-                        " GLV_BATCH_SIZE / GLV_WORKERS if this repeats", path, self.timeout, delay)
+                        " GLV_BATCH_SIZE / GLV_WORKERS if this repeats",
+                        path,
+                        self.timeout,
+                        delay,
+                    )
                 else:
                     log.warning("TEI %s unreachable (%s), retrying in %.0fs", path, exc, delay)
             time.sleep(delay)
@@ -138,8 +148,9 @@ class TEIClient:
         return [v for b in results for v in b]
 
 
-def check_model(info: ModelInfo, expected_model: str, expected_dims: int,
-                client: TEIClient | None = None) -> None:
+def check_model(
+    info: ModelInfo, expected_model: str, expected_dims: int, client: TEIClient | None = None
+) -> None:
     """Refuse to proceed when the server's model is not the configured one (premise P5).
 
     When `/info` does not state the width and a client is given, one embedding is measured.

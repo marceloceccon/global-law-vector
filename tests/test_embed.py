@@ -24,8 +24,9 @@ class _Stub(BaseHTTPRequestHandler):
             self.end_headers()
             return
         if self.path == "/info":
-            body = json.dumps({"model_id": "stub/model", "hidden_size": 3,
-                               "max_input_length": 8192}).encode()
+            body = json.dumps(
+                {"model_id": "stub/model", "hidden_size": 3, "max_input_length": 8192}
+            ).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()

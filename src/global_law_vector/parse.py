@@ -88,7 +88,7 @@ def first_heading(body: str) -> str | None:
 
 
 def title_from_path(path: str, corpus_path: str) -> str:
-    """"lei-1990-07004 / art-0001" for a bare file, from its path inside the corpus."""
+    """ "lei-1990-07004 / art-0001" for a bare file, from its path inside the corpus."""
     rel = PurePosixPath(path[len(corpus_path) :].lstrip("/"))
     parts = list(rel.with_suffix("").parts)
     return " / ".join(parts) if parts else path
@@ -97,7 +97,7 @@ def title_from_path(path: str, corpus_path: str) -> str:
 def parse_document(path: str, corpus_path: str, raw: bytes) -> Document:
     """Parse a provision file. `path` is relative to the root; `raw` is the file's bytes."""
     text = raw.decode("utf-8", errors="replace")
-    if text.startswith("﻿"):
+    if text.startswith("\ufeff"):  # byte-order mark
         text = text[1:]
     front, body = parse_front_matter(text)
     body = body.strip("\n")

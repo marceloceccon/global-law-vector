@@ -60,8 +60,14 @@ def test_front_matter_scalars():
         '---\nname: "quoted"\nn: 12\nflag: true\nnothing: null\n'
         'list: [a, "b"]\nplain: x y\n---\nbody'
     )
-    assert fm == {"name": "quoted", "n": 12, "flag": True, "nothing": None,
-                  "list": ["a", "b"], "plain": "x y"}
+    assert fm == {
+        "name": "quoted",
+        "n": 12,
+        "flag": True,
+        "nothing": None,
+        "list": ["a", "b"],
+        "plain": "x y",
+    }
     assert rest == "body"
 
 

@@ -90,7 +90,7 @@ def test_check_reports_unreachable_services(env, monkeypatch, capsys):
     monkeypatch.setenv("DATABASE_URL", "postgresql://nobody@127.0.0.1:9/none")
     assert main(["check"]) == 1
     out = capsys.readouterr().out
-    assert "7 corpora" in out and "UNREACHABLE" in out and "docker network connect" in out
+    assert "7 corpora" in out and "UNREACHABLE" in out and "same Docker network" in out
 
 
 def test_index_fails_fast_when_unreachable(env, monkeypatch, capsys):
@@ -98,3 +98,27 @@ def test_index_fails_fast_when_unreachable(env, monkeypatch, capsys):
     monkeypatch.setenv("DATABASE_URL", "postgresql://nobody@127.0.0.1:9/none")
     assert main(["index", "--offline", "--country", "malta"]) == 1
     assert "not reachable" in capsys.readouterr().err
+
+
+def test_redact_hides_the_password():
+    from global_law_vector.cli import redact
+
+    shown = redact("postgresql://alice:s3cret@db.example:5432/law")
+    assert "s3cret" not in shown and "alice" in shown and "db.example" in shown
+    assert redact("postgresql://alice@db.example/law").count("***") == 0
+
+
+def test_env_example_loads_as_documented(tmp_path, monkeypatch):
+    """`cp .env.example .env` is the first step of the README: every value must parse."""
+    import pathlib
+
+    from global_law_vector.config import Config
+
+    example = pathlib.Path(__file__).parent.parent / ".env.example"
+    for line in example.read_text().splitlines():
+        key = line.split("=", 1)[0].lstrip("# ").strip()
+        if key:
+            monkeypatch.delenv(key, raising=False)
+    cfg = Config.from_env(example)
+    assert cfg.batch_size == 16 and cfg.workers == 2 and cfg.tei_timeout == 600
+    assert cfg.query_prefix == "query: "

@@ -7,8 +7,10 @@ lives here and is recorded in the database by the store, so a change is detected
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 DEFAULT_MODEL = "Snowflake/snowflake-arctic-embed-m-v2.0"
 DEFAULT_DIMS = 768
@@ -16,8 +18,15 @@ DEFAULT_MAX_TOKENS = 8192
 DEFAULT_QUERY_PREFIX = "query: "
 
 
+_INLINE_COMMENT = re.compile(r"\s+#.*$")
+
+
 def load_dotenv(path: Path | None = None) -> dict[str, str]:
-    """Read KEY=VALUE lines from a .env file without overriding the real environment."""
+    """Read KEY=VALUE lines from a .env file without overriding the real environment.
+
+    Blank lines and `#` comments are skipped. A value may be quoted; an unquoted value ends at
+    a `#` preceded by whitespace, so `.env.example` can carry comments after its values.
+    """
     path = path or Path(".env")
     values: dict[str, str] = {}
     if not path.is_file():
@@ -28,7 +37,11 @@ def load_dotenv(path: Path | None = None) -> dict[str, str]:
             continue
         key, _, value = line.partition("=")
         key = key.strip()
-        value = value.strip().strip('"').strip("'")
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        else:
+            value = _INLINE_COMMENT.sub("", value)
         if key and key not in os.environ:
             os.environ[key] = value
             values[key] = value
@@ -46,6 +59,16 @@ def _find_global_law() -> Path:
     return Path("global-law")
 
 
+def _number(env: os._Environ[str], name: str, default: float, kind: type) -> Any:
+    raw = env.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return kind(raw)
+    except ValueError:
+        raise ValueError(f"{name} must be a number, not {raw!r}") from None
+
+
 @dataclass(slots=True)
 class Config:
     global_law: Path = field(default_factory=_find_global_law)
@@ -60,7 +83,6 @@ class Config:
     document_prefix: str = ""
     vector_type: str = "halfvec"  # or "vector"
     chunk_tokens: int = 1024
-    chunk_overlap: int = 0
     batch_size: int = 16  # TEI's default --max-client-batch-size is 32
     workers: int = 2
     tei_timeout: float = 600.0  # a CPU server can take minutes per batch
@@ -79,22 +101,21 @@ class Config:
         cfg.tei_url = env.get("TEI_URL", cfg.tei_url).rstrip("/")
         cfg.tei_api_key = env.get("TEI_API_KEY") or None
         cfg.model = env.get("GLV_MODEL", cfg.model)
-        cfg.dims = int(env.get("GLV_DIMS", cfg.dims))
-        cfg.max_tokens = int(env.get("GLV_MAX_TOKENS", cfg.max_tokens))
+        cfg.dims = _number(env, "GLV_DIMS", cfg.dims, int)
+        cfg.max_tokens = _number(env, "GLV_MAX_TOKENS", cfg.max_tokens, int)
         cfg.query_prefix = env.get("GLV_QUERY_PREFIX", cfg.query_prefix)
         cfg.document_prefix = env.get("GLV_DOCUMENT_PREFIX", cfg.document_prefix)
         cfg.vector_type = env.get("GLV_VECTOR_TYPE", cfg.vector_type)
-        cfg.chunk_tokens = int(env.get("GLV_CHUNK_TOKENS", cfg.chunk_tokens))
-        cfg.chunk_overlap = int(env.get("GLV_CHUNK_OVERLAP", cfg.chunk_overlap))
-        cfg.batch_size = int(env.get("GLV_BATCH_SIZE", cfg.batch_size))
-        cfg.workers = int(env.get("GLV_WORKERS", cfg.workers))
-        cfg.tei_timeout = float(env.get("GLV_TEI_TIMEOUT", cfg.tei_timeout))
+        cfg.chunk_tokens = _number(env, "GLV_CHUNK_TOKENS", cfg.chunk_tokens, int)
+        cfg.batch_size = _number(env, "GLV_BATCH_SIZE", cfg.batch_size, int)
+        cfg.workers = _number(env, "GLV_WORKERS", cfg.workers, int)
+        cfg.tei_timeout = _number(env, "GLV_TEI_TIMEOUT", cfg.tei_timeout, float)
         if env.get("GLV_TOKENIZER"):
             cfg.tokenizer_path = Path(env["GLV_TOKENIZER"]).expanduser()
         cfg.selection_file = Path(env.get("GLV_SELECTION", str(cfg.selection_file)))
         if env.get("GLV_CACHE_DIR"):
             cfg.cache_dir = Path(env["GLV_CACHE_DIR"]).expanduser()
-        cfg.chunks_per_second = float(env.get("GLV_CHUNKS_PER_SECOND", cfg.chunks_per_second))
+        cfg.chunks_per_second = _number(env, "GLV_CHUNKS_PER_SECOND", cfg.chunks_per_second, float)
         if cfg.vector_type not in ("vector", "halfvec"):
             raise ValueError(
                 f"GLV_VECTOR_TYPE must be 'vector' or 'halfvec', not {cfg.vector_type!r}"

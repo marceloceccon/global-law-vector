@@ -1,6 +1,6 @@
 """End to end against the real services. Skipped unless both are reachable.
 
-Set DATABASE_URL and TEI_URL (defaults: the global-law-utility containers on localhost). The
+Set DATABASE_URL and TEI_URL (defaults: the containers from the README on localhost). The
 test uses its own schema `glv_test` and drops it afterwards.
 """
 
@@ -67,11 +67,22 @@ def test_index_then_search(cfg, tree):
         assert sum(len(p.to_index) for p in plans) == 0
         assert sum(p.unchanged for p in plans) == 7
         store.build_hnsw(maintenance_work_mem="256MB")
-        hits = search(store, client, "solidarity surcharge on income tax", top=3,
-                      query_prefix=cfg.query_prefix)
+        hits = search(
+            store,
+            client,
+            "solidarity surcharge on income tax",
+            top=3,
+            query_prefix=cfg.query_prefix,
+        )
         assert hits and hits[0].path == "germany/bund/acts/solzg/0001.md"
-        hits = search(store, client, "prazo de pagamento do comissário", top=3,
-                      countries=["brazil"], query_prefix=cfg.query_prefix)
+        hits = search(
+            store,
+            client,
+            "prazo de pagamento do comissário",
+            top=3,
+            countries=["brazil"],
+            query_prefix=cfg.query_prefix,
+        )
         assert hits and all(h.country == "brazil" for h in hits)
         assert hits[0].path.endswith("codigo-civil/art-0700.md")
     finally:

@@ -1,5 +1,5 @@
 -- global-law-vector schema, version 1.
--- Placeholders filled by store.py: {schema}, {vector_type}, {dims}.
+-- Store.migrate() fills the three placeholders in curly braces: schema, vector_type, dims.
 CREATE EXTENSION IF NOT EXISTS vector;
 CREATE SCHEMA IF NOT EXISTS {schema};
 

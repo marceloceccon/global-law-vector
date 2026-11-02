@@ -12,14 +12,17 @@ np = pytest.importorskip("numpy")
 
 
 def test_allocate_balances_small_countries_and_fills_from_large_ones():
-    by_country = {"malta": list(range(100)), "france": list(range(1000, 11000)),
-                  "spain": list(range(20000, 25000))}
+    by_country = {
+        "malta": list(range(100)),
+        "france": list(range(1000, 11000)),
+        "spain": list(range(20000, 25000)),
+    }
     chosen = allocate(by_country, 3000)
     counts = {}
     for _, c in chosen:
         counts[c] = counts.get(c, 0) + 1
     assert len(chosen) == 3000
-    assert counts["malta"] == 100               # everything it has
+    assert counts["malta"] == 100  # everything it has
     assert counts["france"] == counts["spain"] == 1450  # the rest split evenly
     # shuffled: the first 300 are not a single country
     assert len({c for _, c in chosen[:300]}) == 3
@@ -43,8 +46,9 @@ def test_normalise_and_write_round_trip(tmp_path):
 
     points = [SamplePoint(i, "brazil" if i % 2 else "malta", f"c{i % 3}") for i in range(500)]
     out = tmp_path / "deep" / "projection.json"
-    doc = write_projection(out, points, xyz, {"brazil": 1000, "malta": 20}, UmapParams(), 300,
-                           "model-x", 768)
+    doc = write_projection(
+        out, points, xyz, {"brazil": 1000, "malta": 20}, UmapParams(), 300, "model-x", 768
+    )
     saved = json.loads(out.read_text())
     assert saved == doc
     assert saved["method"] == "umap" and saved["params"]["fit"] == 300

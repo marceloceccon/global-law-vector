@@ -1,7 +1,10 @@
-"""`glv`: select, index, status, search, tui.
+"""`glv`, the command line: check, list, select, index, status, search, reset, project, tui.
 
-Standard-library argparse; the TUI is imported only when asked for, so the package works
-without Textual installed.
+Standard-library argparse. Optional dependencies (Textual for the TUI, UMAP for `project`)
+are imported only by the commands that need them.
+
+Exit codes: 0 success, 1 failure (unreachable service, mismatched index, failed run),
+2 usage error (unknown country or corpus, missing tree), 130 interrupted.
 """
 
 from __future__ import annotations
@@ -17,7 +20,7 @@ from . import __version__
 from .config import Config
 from .discover import StatsCache, Tree, discover, stats_for
 from .index import Indexer, Progress, dry_run_counts, plan_corpus, resolve_root
-from .selection import Selection, estimate, human_bytes, human_duration
+from .selection import CHUNKS_PER_FILE, Selection, estimate, human_bytes, human_duration
 
 log = logging.getLogger("glv")
 
@@ -73,19 +76,34 @@ def _show_selection(cfg: Config, tree: Tree, sel: Selection, with_stats: bool = 
             print(c.path)
         return 0
     cache = StatsCache(cfg.cache_dir, tree.root)
-    stats = stats_for(tree, corpora, cache, progress=lambda c, i, n: print(
-        f"\rscanning {i + 1}/{n} {c.path:<60}", end="", file=sys.stderr))
+    stats = stats_for(
+        tree,
+        corpora,
+        cache,
+        progress=lambda c, i, n: print(
+            f"\rscanning {i + 1}/{n} {c.path:<60}", end="", file=sys.stderr
+        ),
+    )
     print("\r" + " " * 90 + "\r", end="", file=sys.stderr)
     rows = []
     for c in corpora:
         s = stats[c.path]
-        rows.append((c.path, c.language or "", f"{s.file_count:,}", human_bytes(s.byte_count),
-                     (c.commit_sha or "")[:10]))
+        rows.append(
+            (
+                c.path,
+                c.language or "",
+                f"{s.file_count:,}",
+                human_bytes(s.byte_count),
+                (c.commit_sha or "")[:10],
+            )
+        )
     _print_table(rows, ("corpus", "lang", "files", "size", "commit"))
     est = estimate(stats, cfg.chunks_per_second, sel.max_files_per_corpus)
     print()
-    print(f"{est.corpora} corpora · {est.files:,} files · {est.human_bytes} · "
-          f"~{est.chunks:,} chunks · est. {est.human_time} at {cfg.chunks_per_second:.0f} chunks/s")
+    print(
+        f"{est.corpora} corpora · {est.files:,} files · {est.human_bytes} · "
+        f"~{est.chunks:,} chunks · est. {est.human_time} at {cfg.chunks_per_second:.0f} chunks/s"
+    )
     return 0
 
 
@@ -102,8 +120,10 @@ def cmd_select(cfg: Config, args: argparse.Namespace) -> int:
     if args.country or args.corpus:
         sel.include(countries=args.country or [], corpora=args.corpus or [])
     if args.exclude:
-        sel.exclude(countries=[x for x in args.exclude if "/" not in x],
-                    corpora=[x for x in args.exclude if "/" in x])
+        sel.exclude(
+            countries=[x for x in args.exclude if "/" not in x],
+            corpora=[x for x in args.exclude if "/" in x],
+        )
     if args.max_files is not None:
         sel.max_files_per_corpus = args.max_files
     try:
@@ -111,8 +131,9 @@ def cmd_select(cfg: Config, args: argparse.Namespace) -> int:
     except KeyError as exc:
         print(f"error: {exc.args[0]}", file=sys.stderr)
         return 2
-    changed = any([args.clear, args.all, args.country, args.corpus, args.exclude,
-                   args.max_files is not None])
+    changed = any(
+        [args.clear, args.all, args.country, args.corpus, args.exclude, args.max_files is not None]
+    )
     if changed:
         sel.save(cfg.selection_file)
         print(f"saved {cfg.selection_file}")
@@ -128,8 +149,15 @@ def cmd_list(cfg: Config, args: argparse.Namespace) -> int:
     for c in tree.corpora:
         if args.country and c.country not in args.country:
             continue
-        rows.append(("x" if sel.is_selected(c) else " ", c.path, c.language or "",
-                     c.label or "", (c.commit_sha or "")[:10]))
+        rows.append(
+            (
+                "x" if sel.is_selected(c) else " ",
+                c.path,
+                c.language or "",
+                c.label or "",
+                (c.commit_sha or "")[:10],
+            )
+        )
     _print_table(rows, ("sel", "corpus", "lang", "label", "commit"))
     print(f"\n{len(rows)} corpora in {len({r[1].split('/')[0] for r in rows})} countries")
     return 0
@@ -142,11 +170,23 @@ def _open_store(cfg: Config):
 
 
 REACH_HINT = (
-    "  Both containers bind to 127.0.0.1 on the host. From inside a devcontainer they are not\n"
-    "  on localhost: on the host run `docker network connect utility <devcontainer-name>`,\n"
-    "  then set TEI_URL=http://utility-embeddings:80 and\n"
-    "  DATABASE_URL=postgresql://utility:utility@utility-pgvector:5432/utility in .env."
+    "  Running inside a container? 127.0.0.1 is then the container itself, not the host.\n"
+    "  Put this container on the same Docker network as the services and use their\n"
+    '  service names in TEI_URL and DATABASE_URL (see README, "Running in a container").'
 )
+
+
+def redact(dsn: str) -> str:
+    """A connection string with its password replaced by ***."""
+    from psycopg.conninfo import conninfo_to_dict, make_conninfo
+
+    try:
+        parts = conninfo_to_dict(dsn)
+    except Exception:  # noqa: BLE001 - unparsable: show nothing of it
+        return "<unparsable DATABASE_URL>"
+    if parts.get("password"):
+        parts["password"] = "***"
+    return make_conninfo(**parts)
 
 
 def _check_services(cfg: Config, need_tei: bool = True, need_db: bool = True) -> list[str]:
@@ -180,8 +220,7 @@ def _preflight(cfg: Config, need_tei: bool = True, need_db: bool = True) -> int:
 
 
 def _looks_local(cfg: Config) -> bool:
-    return any(h in cfg.tei_url or h in cfg.database_url
-               for h in ("127.0.0.1", "localhost", "utility-"))
+    return any(h in cfg.tei_url or h in cfg.database_url for h in ("127.0.0.1", "localhost"))
 
 
 def cmd_check(cfg: Config, args: argparse.Namespace) -> int:
@@ -194,8 +233,10 @@ def cmd_check(cfg: Config, args: argparse.Namespace) -> int:
     except FileNotFoundError as exc:
         print(f"global-law tree   MISSING: {exc}")
         ok = False
-    print(f"selection file    {cfg.selection_file}"
-          f"{'' if cfg.selection_file.is_file() else '  (not created yet)'}")
+    print(
+        f"selection file    {cfg.selection_file}"
+        f"{'' if cfg.selection_file.is_file() else '  (not created yet)'}"
+    )
     from .embed import EmbeddingError, TEIClient
 
     client = TEIClient(cfg.tei_url, retries=0, timeout=10, api_key=cfg.tei_api_key)
@@ -210,8 +251,10 @@ def cmd_check(cfg: Config, args: argparse.Namespace) -> int:
             except EmbeddingError:
                 dims = None
         shown = dims or "busy, not measured"
-        print(f"embeddings        {cfg.tei_url}  {info.model_id} dims={shown} "
-              f"max_tokens={info.max_input_length}")
+        print(
+            f"embeddings        {cfg.tei_url}  {info.model_id} dims={shown} "
+            f"max_tokens={info.max_input_length}"
+        )
         if dims and dims != cfg.dims:
             print(f"                  WARNING: GLV_DIMS is {cfg.dims}")
             ok = False
@@ -226,8 +269,10 @@ def cmd_check(cfg: Config, args: argparse.Namespace) -> int:
         print(f"database          UNREACHABLE: {problems[0]}")
         ok = False
     else:
-        print(f"database          {cfg.database_url}  schema={cfg.schema} "
-              f"{cfg.vector_type}({cfg.dims})")
+        print(
+            f"database          {redact(cfg.database_url)}  schema={cfg.schema} "
+            f"{cfg.vector_type}({cfg.dims})"
+        )
     if not ok and _looks_local(cfg):
         print()
         print(REACH_HINT)
@@ -248,8 +293,9 @@ def cmd_index(cfg: Config, args: argparse.Namespace) -> int:
     if not corpora:
         print("selection is empty; nothing to index", file=sys.stderr)
         return 1
-    tok = load_tokenizer(cfg.model, cfg.tokenizer_path, allow_network=not args.offline,
-                         cache_dir=cfg.cache_dir)
+    tok = load_tokenizer(
+        cfg.model, cfg.tokenizer_path, allow_network=not args.offline, cache_dir=cfg.cache_dir
+    )
     max_files = sel.max_files_per_corpus
 
     if args.dry_run:
@@ -260,8 +306,12 @@ def cmd_index(cfg: Config, args: argparse.Namespace) -> int:
             tf, tc, tt = tf + f, tc + ch, tt + t
             rows.append((c.path, f"{f:,}", f"{ch:,}", f"{t:,}"))
         _print_table(rows, ("corpus", "files", "chunks", "tokens"))
-        print(f"\n{len(corpora)} corpora · {tf:,} files · {tc:,} chunks · {tt:,} tokens · "
-              f"est. {human_duration(tc / cfg.chunks_per_second)} (tokenizer: {tok.name})")
+        rate = cfg.chunks_per_second
+        eta = f"est. {human_duration(tc / rate)}" if rate > 0 else "no time estimate"
+        print(
+            f"\n{len(corpora)} corpora · {tf:,} files · {tc:,} chunks · {tt:,} tokens · "
+            f"{eta} (tokenizer: {tok.name})"
+        )
         return 0
 
     if _preflight(cfg):
@@ -272,7 +322,7 @@ def cmd_index(cfg: Config, args: argparse.Namespace) -> int:
     store = _open_store(cfg)
     try:
         store.migrate()
-        store.ensure_meta(cfg.model, tok.name, cfg.chunk_tokens)
+        store.ensure_meta(cfg.model, tok.name, cfg.chunk_tokens, cfg.document_prefix)
         measured = store.get_meta().get("chunks_per_second")
         if measured:
             cfg.chunks_per_second = float(measured)
@@ -280,23 +330,33 @@ def cmd_index(cfg: Config, args: argparse.Namespace) -> int:
         for c in corpora:
             pl = plan_corpus(tree, c, store, max_files)
             plans.append(pl)
-            print(f"{c.path}: {len(pl.to_index):,} to index, {pl.unchanged:,} unchanged, "
-                  f"{len(pl.to_delete):,} to delete")
-        if not any(pl.to_index or pl.to_delete for pl in plans):
-            print("nothing to do")
-        else:
-            def show(p: Progress) -> None:
-                rate = p.chunks_per_second
-                eta = ((p.files_total - p.files_done) * 1.05 / rate) if rate else 0
-                print(f"\r{p.corpus:<48} files {p.files_done:,}/{p.files_total:,}  "
-                      f"chunks {p.chunks_done:,}  {rate:.1f}/s  eta {human_duration(eta)}   ",
-                      end="", file=sys.stderr, flush=True)
+            print(
+                f"{c.path}: {len(pl.to_index):,} to index, {pl.unchanged:,} unchanged, "
+                f"{len(pl.to_delete):,} to delete"
+            )
 
-            indexer = Indexer(cfg, tree, store, client, tok, progress=show)
-            p = indexer.run(plans)
+        def show(p: Progress) -> None:
+            rate = p.chunks_per_second
+            eta = ((p.files_total - p.files_done) * CHUNKS_PER_FILE / rate) if rate else 0
+            print(
+                f"\r{p.corpus:<48} files {p.files_done:,}/{p.files_total:,}  "
+                f"chunks {p.chunks_done:,}  {rate:.1f}/s  eta {human_duration(eta)}   ",
+                end="",
+                file=sys.stderr,
+                flush=True,
+            )
+
+        # Run even when no file changed: it records new corpus commits and completes a corpus
+        # whose previous run stopped after its last write.
+        p = Indexer(cfg, tree, store, client, tok, progress=show).run(plans)
+        if p.files_total:
             print(file=sys.stderr)
-            print(f"indexed {p.files_done:,} files, {p.chunks_done:,} chunks in "
-                  f"{human_duration(p.elapsed)} ({p.chunks_per_second:.1f} chunks/s)")
+            print(
+                f"indexed {p.files_done:,} files, {p.chunks_done:,} chunks in "
+                f"{human_duration(p.elapsed)} ({p.chunks_per_second:.1f} chunks/s)"
+            )
+        else:
+            print("nothing to index")
         if args.build_index or (not args.no_build_index and not store.has_hnsw()):
             print("building HNSW index…", file=sys.stderr)
             store.build_hnsw()
@@ -314,9 +374,9 @@ def cmd_status(cfg: Config, args: argparse.Namespace) -> int:
         print(f"database unreachable: {exc}", file=sys.stderr)
         return 1
     try:
-        store.migrate()
-        meta = store.get_meta()
-        rows_db = store.corpus_rows()
+        exists = store.schema_exists()
+        meta = store.get_meta() if exists else {}
+        rows_db = store.corpus_rows() if exists else {}
     finally:
         store.close()
     rows = []
@@ -332,12 +392,21 @@ def cmd_status(cfg: Config, args: argparse.Namespace) -> int:
             state = "stale"
         else:
             state = "indexed " + r.completed_at.strftime("%Y-%m-%d")
-        rows.append(("x" if sel.is_selected(c) else " ", c.path, state,
-                     f"{r.documents:,}" if r else "", f"{r.chunks:,}" if r else ""))
+        rows.append(
+            (
+                "x" if sel.is_selected(c) else " ",
+                c.path,
+                state,
+                f"{r.documents:,}" if r else "",
+                f"{r.chunks:,}" if r else "",
+            )
+        )
     _print_table(rows, ("sel", "corpus", "state", "docs", "chunks"))
     if meta:
-        print(f"\nindex: model={meta.get('model')} dims={meta.get('dims')} "
-              f"type={meta.get('vector_type')} chunks/s={meta.get('chunks_per_second', '?')}")
+        print(
+            f"\nindex: model={meta.get('model')} dims={meta.get('dims')} "
+            f"type={meta.get('vector_type')} chunks/s={meta.get('chunks_per_second', '?')}"
+        )
     return 0
 
 
@@ -350,18 +419,28 @@ def cmd_search(cfg: Config, args: argparse.Namespace) -> int:
     store = _open_store(cfg)
     try:
         client = TEIClient(cfg.tei_url, timeout=cfg.tei_timeout, api_key=cfg.tei_api_key)
-        hits = search(store, client, args.query, query_prefix=cfg.query_prefix,
-                      top=args.top, countries=args.country or [], corpora=args.corpus or [])
+        hits = search(
+            store,
+            client,
+            args.query,
+            query_prefix=cfg.query_prefix,
+            top=args.top,
+            countries=args.country or [],
+            corpora=args.corpus or [],
+        )
     finally:
         store.close()
     for i, h in enumerate(hits, 1):
         where = f"{h.path}" + (f" #{h.ordinal}" if h.ordinal else "")
         print(f"{i:2d}. {h.score:.3f}  {where}")
-        print(f"    {h.title or ''}" + (f"  [{h.citation}]" if h.citation else "")
-              + (f"  ({h.heading_path})" if h.heading_path else ""))
+        print(
+            f"    {h.title or ''}"
+            + (f"  [{h.citation}]" if h.citation else "")
+            + (f"  ({h.heading_path})" if h.heading_path else "")
+        )
         if not args.short:
             snippet = " ".join(h.text.split())
-            print(f"    {snippet[:args.width]}{'…' if len(snippet) > args.width else ''}")
+            print(f"    {snippet[: args.width]}{'…' if len(snippet) > args.width else ''}")
     return 0
 
 
@@ -395,12 +474,19 @@ def cmd_project(cfg: Config, args: argparse.Namespace) -> int:
     except Exception as exc:  # noqa: BLE001
         print(f"database unreachable: {exc}", file=sys.stderr)
         return 1
-    params = UmapParams(n_neighbors=args.neighbors, min_dist=args.min_dist,
-                        metric=args.metric, seed=args.seed)
+    params = UmapParams(
+        n_neighbors=args.neighbors, min_dist=args.min_dist, metric=args.metric, seed=args.seed
+    )
     t0 = time.monotonic()
     try:
-        project(store, out, points=args.points, fit=args.fit, params=params,
-                progress=lambda m: print(f"[{time.monotonic() - t0:6.0f}s] {m}", file=sys.stderr))
+        project(
+            store,
+            out,
+            points=args.points,
+            fit=args.fit,
+            params=params,
+            progress=lambda m: print(f"[{time.monotonic() - t0:6.0f}s] {m}", file=sys.stderr),
+        )
     except RuntimeError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -424,11 +510,17 @@ def cmd_tui(cfg: Config, args: argparse.Namespace) -> int:
 def _add_selection_flags(p: argparse.ArgumentParser) -> None:
     p.add_argument("--country", action="append", metavar="NAME", help="include a country")
     p.add_argument("--corpus", action="append", metavar="PATH", help="include a corpus path")
-    p.add_argument("--exclude", action="append", metavar="NAME|PATH",
-                   help="exclude a country or corpus")
+    p.add_argument(
+        "--exclude", action="append", metavar="NAME|PATH", help="exclude a country or corpus"
+    )
     p.add_argument("--all", action="store_true", help="every pinned corpus")
-    p.add_argument("--max-files", type=int, default=None, metavar="N",
-                   help="sample at most N files per corpus (0 = no limit)")
+    p.add_argument(
+        "--max-files",
+        type=int,
+        default=None,
+        metavar="N",
+        help="sample at most N files per corpus (0 = no limit)",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -452,12 +544,22 @@ def build_parser() -> argparse.ArgumentParser:
     _add_selection_flags(s)
     s.add_argument("--dry-run", action="store_true", help="parse and chunk, embed nothing")
     s.add_argument("--offline", action="store_true", help="do not fetch the tokenizer")
-    s.add_argument("--build-index", action="store_true", help="(re)build the HNSW index after")
-    s.add_argument("--no-build-index", action="store_true", help="skip the HNSW build")
+    hnsw = s.add_mutually_exclusive_group()
+    hnsw.add_argument(
+        "--build-index",
+        action="store_true",
+        help="build the HNSW index after the run if it is missing (the default)",
+    )
+    hnsw.add_argument(
+        "--no-build-index",
+        action="store_true",
+        help="do not build the HNSW index (e.g. between several runs)",
+    )
     s.set_defaults(func=cmd_index)
 
-    s = sub.add_parser("check", 
-                       help="are the tree, the embeddings server and the database reachable")
+    s = sub.add_parser(
+        "check", help="are the tree, the embeddings server and the database reachable"
+    )
     s.set_defaults(func=cmd_check)
 
     s = sub.add_parser("status", help="per corpus: selected, indexed, stale, partial")
@@ -477,17 +579,21 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--yes", action="store_true")
     s.set_defaults(func=cmd_reset)
 
-    s = sub.add_parser("project",
-                       help="cache a 3-D UMAP layout of a sample of the index for web/")
+    s = sub.add_parser("project", help="cache a 3-D UMAP layout of a sample of the index for web/")
     s.add_argument("--points", type=int, default=40_000, help="sample size (default 40000)")
-    s.add_argument("--fit", type=int, default=20_000,
-                   help="fit UMAP on this many, place the rest with transform (default 20000)")
+    s.add_argument(
+        "--fit",
+        type=int,
+        default=20_000,
+        help="fit UMAP on this many, place the rest with transform (default 20000)",
+    )
     s.add_argument("--neighbors", type=int, default=20, help="UMAP n_neighbors (default 20)")
     s.add_argument("--min-dist", type=float, default=0.1, help="UMAP min_dist (default 0.1)")
     s.add_argument("--metric", default="cosine", help="UMAP metric (default cosine)")
     s.add_argument("--seed", type=int, default=42)
-    s.add_argument("--out", metavar="PATH",
-                   help="where to write (default $GLV_CACHE_DIR/projection.json)")
+    s.add_argument(
+        "--out", metavar="PATH", help="where to write (default $GLV_CACHE_DIR/projection.json)"
+    )
     s.set_defaults(func=cmd_project)
 
     s = sub.add_parser("tui", help="interactive terminal UI")
@@ -504,12 +610,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     if not args.verbose:
         logging.getLogger().setLevel(logging.WARNING)
-    cfg = Config.from_env()
+    from psycopg import Error as DatabaseError
+
+    from .embed import EmbeddingError
+    from .store import IndexMismatch
+
     try:
+        cfg = Config.from_env()
         return args.func(cfg, args)
     except FileNotFoundError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    except (ValueError, EmbeddingError, IndexMismatch) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except DatabaseError as exc:
+        print(f"error: database: {str(exc).strip()}", file=sys.stderr)
+        return 1
     except KeyboardInterrupt:
         print("\ninterrupted; rerun to resume", file=sys.stderr)
         return 130

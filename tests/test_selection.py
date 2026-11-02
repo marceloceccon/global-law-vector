@@ -11,13 +11,18 @@ from global_law_vector.selection import Selection, estimate, human_bytes, human_
 def test_resolve_countries_and_corpora(tree):
     sel = Selection(countries=["brazil"], corpora=["germany/bund/acts"])
     assert [c.path for c in sel.resolve(tree)] == [
-        "brazil/national/acts", "brazil/sao-paulo/acts", "germany/bund/acts"]
+        "brazil/national/acts",
+        "brazil/sao-paulo/acts",
+        "germany/bund/acts",
+    ]
 
 
 def test_exclude_wins(tree):
-    sel = Selection(countries=["brazil", "united-states"],
-                    exclude_corpora=["brazil/sao-paulo/acts"],
-                    exclude_countries=["united-states"])
+    sel = Selection(
+        countries=["brazil", "united-states"],
+        exclude_corpora=["brazil/sao-paulo/acts"],
+        exclude_countries=["united-states"],
+    )
     assert [c.path for c in sel.resolve(tree)] == ["brazil/national/acts"]
     assert sel.is_selected(tree.by_path()["brazil/national/acts"])
     assert not sel.is_selected(tree.by_path()["brazil/sao-paulo/acts"])
@@ -50,8 +55,12 @@ def test_include_and_exclude_edit_consistently():
 
 
 def test_toml_round_trip(tmp_path: Path):
-    sel = Selection(countries=["brazil", "germany"], corpora=["united-states/federal/usc"],
-                    exclude_corpora=["brazil/sao-paulo/acts"], max_files_per_corpus=50)
+    sel = Selection(
+        countries=["brazil", "germany"],
+        corpora=["united-states/federal/usc"],
+        exclude_corpora=["brazil/sao-paulo/acts"],
+        max_files_per_corpus=50,
+    )
     f = tmp_path / "selection.toml"
     sel.save(f)
     back = Selection.load(f)

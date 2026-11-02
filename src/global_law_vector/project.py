@@ -5,7 +5,7 @@ keeps the global shape of the embedding space but squashes local structure, so t
 looks like one blob. UMAP keeps neighbourhoods instead, at a cost of minutes of CPU, which is
 why it runs here, once, and is cached as JSON that the web API serves.
 
-Method, as written into the file: a country-balanced random sample of `points` chunks (every
+Method, as written into the file: a country-balanced, seeded sample of `points` chunks (every
 country gets an equal share; unused share flows to the larger ones); UMAP with three
 components fitted on the first `fit` of them (the order is shuffled, so the fit sample is
 balanced too) and the rest placed with `transform`; coordinates centred and scaled so the
@@ -25,8 +25,6 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-
-from psycopg import sql
 
 from .store import Store
 
@@ -70,70 +68,66 @@ def allocate(by_country: dict[str, list[int]], n: int, seed: int = 42) -> list[t
     return out
 
 
-def sample_points(store: Store, n: int, seed: int = 42
-                  ) -> tuple[list[SamplePoint], dict[str, int]]:
-    """A balanced random sample of chunk ids with their country and corpus, plus the number
-    of chunks each country has in the index."""
-    q = sql.SQL("""
-        WITH ranked AS (
-          SELECT ch.id, co.country, co.path AS corpus,
-                 row_number() OVER (PARTITION BY co.country ORDER BY random()) AS rn,
-                 count(*)     OVER (PARTITION BY co.country)                   AS total
-          FROM {chunk} ch
-          JOIN {document} d  ON d.id = ch.document_id
-          JOIN {corpus}   co ON co.id = d.corpus_id
-        )
-        SELECT id, country, corpus, total FROM ranked WHERE rn <= %s ORDER BY country, rn
-    """).format(chunk=store._t("chunk"), document=store._t("document"), corpus=store._t("corpus"))
+def sample_points(store: Store, n: int, seed: int = 42) -> tuple[list[SamplePoint], dict[str, int]]:
+    """A country-balanced sample of chunk ids with their country and corpus, plus the number
+    of chunks each country has in the index. The same seed gives the same sample from an
+    unchanged index."""
     by_country: dict[str, list[int]] = {}
     meta: dict[int, tuple[str, str]] = {}
     totals: dict[str, int] = {}
-    with store.conn.cursor() as cur:
-        cur.execute(q, (n,))
-        for cid, country, corpus, total in cur:
-            by_country.setdefault(country, []).append(cid)
-            meta[cid] = (country, corpus)
-            totals[country] = int(total)
-    store.conn.rollback()
+    for cid, country, corpus, total in store.sample_by_country(n, seed):
+        by_country.setdefault(country, []).append(cid)
+        meta[cid] = (country, corpus)
+        totals[country] = total
     chosen = allocate(by_country, n, seed)
-    return [SamplePoint(cid, meta[cid][0], meta[cid][1]) for cid, _ in chosen], totals
+    return [SamplePoint(cid, *meta[cid]) for cid, _ in chosen], totals
 
 
-def fetch_embeddings(store: Store, ids: list[int], batch: int = 2000,
-                     progress: Progress | None = None) -> np.ndarray:
+def fetch_embeddings(
+    store: Store, ids: list[int], batch: int = 2000, progress: Progress | None = None
+) -> np.ndarray:
     """The vectors for `ids`, in that order, as float32."""
     import numpy as np
 
     out = np.empty((len(ids), store.dims), dtype=np.float32)
     pos = {cid: i for i, cid in enumerate(ids)}
-    q = sql.SQL("SELECT id, embedding::text FROM {} WHERE id = ANY(%s)").format(store._t("chunk"))
     seen = 0
-    with store.conn.cursor() as cur:
-        for start in range(0, len(ids), batch):
-            cur.execute(q, (ids[start:start + batch],))
-            for cid, text in cur:
-                out[pos[cid]] = np.array(json.loads(text), dtype=np.float32)
-                seen += 1
-            if progress:
-                progress(f"fetched {seen:,}/{len(ids):,} embeddings")
-    store.conn.rollback()
+    for rows in store.iter_embeddings(ids, batch):
+        for cid, text in rows:
+            vec = np.asarray(json.loads(text), dtype=np.float32)
+            if vec.shape != (store.dims,):
+                raise RuntimeError(
+                    f"chunk {cid} has {vec.size} dimensions, GLV_DIMS is {store.dims}"
+                )
+            out[pos[cid]] = vec
+            seen += 1
+        if progress:
+            progress(f"fetched {seen:,}/{len(ids):,} embeddings")
     if seen != len(ids):
         raise RuntimeError(f"{len(ids) - seen} sampled chunks vanished while projecting; rerun")
     return out
 
 
-def reduce_umap(x: np.ndarray, fit: int, params: UmapParams,
-                progress: Progress | None = None) -> np.ndarray:
+def reduce_umap(
+    x: np.ndarray, fit: int, params: UmapParams, progress: Progress | None = None
+) -> np.ndarray:
     """3-D UMAP: fit on the first `fit` rows, place the rest with transform()."""
     try:
         import umap
     except ImportError as exc:  # pragma: no cover - environment dependent
         raise RuntimeError(
-            "UMAP is not installed: pip install 'global-law-vector[project]'") from exc
+            "UMAP is not installed: pip install 'global-law-vector[project]'"
+        ) from exc
 
     fit = min(max(fit, 1), len(x))
-    reducer = umap.UMAP(n_components=3, n_neighbors=params.n_neighbors, min_dist=params.min_dist,
-                        metric=params.metric, random_state=params.seed, verbose=False)
+    reducer = umap.UMAP(
+        n_components=3,
+        n_neighbors=params.n_neighbors,
+        min_dist=params.min_dist,
+        metric=params.metric,
+        random_state=params.seed,
+        verbose=False,
+    )
     t0 = time.monotonic()
     if progress:
         progress(f"fitting UMAP on {fit:,} points (this is the slow part)")
@@ -157,9 +151,16 @@ def normalise(xyz: np.ndarray) -> np.ndarray:
     return (centred / radius).astype(np.float32)
 
 
-def write_projection(path: Path, points: list[SamplePoint], xyz: np.ndarray,
-                     totals: dict[str, int], params: UmapParams, fit: int,
-                     model: str | None, dims: int) -> dict[str, Any]:
+def write_projection(
+    path: Path,
+    points: list[SamplePoint],
+    xyz: np.ndarray,
+    totals: dict[str, int],
+    params: UmapParams,
+    fit: int,
+    model: str | None,
+    dims: int,
+) -> dict[str, Any]:
     """Columnar JSON the web API reads. Written atomically."""
     countries = sorted({p.country for p in points})
     corpora = sorted({p.corpus for p in points})
@@ -189,8 +190,14 @@ def write_projection(path: Path, points: list[SamplePoint], xyz: np.ndarray,
     return doc
 
 
-def project(store: Store, out: Path, points: int = 40_000, fit: int = 20_000,
-            params: UmapParams | None = None, progress: Progress | None = None) -> dict[str, Any]:
+def project(
+    store: Store,
+    out: Path,
+    points: int = 40_000,
+    fit: int = 20_000,
+    params: UmapParams | None = None,
+    progress: Progress | None = None,
+) -> dict[str, Any]:
     """Sample, fetch, reduce, write. Returns the document written."""
     params = params or UmapParams()
     say = progress or (lambda m: None)

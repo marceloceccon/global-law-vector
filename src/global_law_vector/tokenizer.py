@@ -15,6 +15,8 @@ from typing import Protocol
 log = logging.getLogger(__name__)
 
 _WORD = re.compile(r"\w+|[^\w\s]", re.UNICODE)
+# Kana, CJK ideographs and Hangul syllables: roughly one token per character.
+_CJK = re.compile("[\u3040-\u9fff\uac00-\ud7af]")
 
 
 class Tokenizer(Protocol):
@@ -32,7 +34,7 @@ class HeuristicTokenizer:
         if not text:
             return 0
         words = _WORD.findall(text)
-        cjk = sum(1 for ch in text if "぀" <= ch <= "鿿")
+        cjk = len(_CJK.findall(text))
         return int(len(words) * 1.3) + cjk + 2
 
 

@@ -28,7 +28,12 @@ from .tokenizer import Tokenizer
 log = logging.getLogger(__name__)
 
 Group = list[tuple[Document, list[Chunk]]]
-_END = None
+_END = object()  # end-of-stream marker on the queues between the three threads
+
+# A group holds about two rounds of embedding requests, and never fewer than this many chunks.
+MIN_GROUP_CHUNKS = 16
+# The measured throughput is recorded only for runs long enough to mean something.
+MIN_SECONDS_TO_RECORD_RATE = 30
 
 
 @dataclass(slots=True)
@@ -69,24 +74,25 @@ class Progress:
 ProgressCallback = Callable[[Progress], None]
 
 
-def plan_corpus(
-    tree: Tree, corpus: Corpus, store: Store | None, max_files: int = 0
-) -> CorpusPlan:
-    """Diff the corpus on disk against what the store holds for it."""
-    files = list(iter_files(tree.root, corpus))
-    if max_files and len(files) > max_files:
-        files = files[:max_files]
-    on_disk = {f.as_posix(): f for f in files}
+def plan_corpus(tree: Tree, corpus: Corpus, store: Store | None, max_files: int = 0) -> CorpusPlan:
+    """Diff the corpus on disk against what the store holds for it.
+
+    `max_files` limits what is indexed (a quick trial run), never what counts as deleted: a
+    stored document is deleted only when its file is gone from the whole corpus.
+    """
+    on_disk = {f.as_posix(): f for f in iter_files(tree.root, corpus)}
     stored: dict[str, str] = {}
     corpus_id: int | None = None
     if store is not None:
-        row = store.corpus_rows().get(corpus.path)
-        if row is not None:
-            corpus_id = row.id
+        corpus_id = store.corpus_id(corpus.path)
+        if corpus_id is not None:
             stored = store.document_hashes(corpus_id)
+    considered = list(on_disk.items())
+    if max_files:
+        considered = considered[:max_files]
     to_index: list[str] = []
     unchanged = 0
-    for rel, p in on_disk.items():
+    for rel, p in considered:
         old = stored.get(rel)
         if old is None:
             to_index.append(rel)
@@ -120,7 +126,7 @@ class Indexer:
         self.progress = Progress()
 
     def _group_size(self) -> int:
-        return max(self.cfg.batch_size * self.cfg.workers * 2, 16)
+        return max(self.cfg.batch_size * self.cfg.workers * 2, MIN_GROUP_CHUNKS)
 
     def run(self, plans: list[CorpusPlan]) -> Progress:
         p = self.progress
@@ -133,7 +139,7 @@ class Indexer:
             self._run_corpus(pl)
             p.corpus_done += 1
             self.progress_cb(p)
-        if p.chunks_done and p.elapsed > 30:
+        if p.chunks_done and p.elapsed > MIN_SECONDS_TO_RECORD_RATE:
             self.store.set_meta(chunks_per_second=f"{p.chunks_per_second:.2f}")
         return p
 
@@ -158,9 +164,11 @@ class Indexer:
             return abort.is_set() or self.stop()
 
         producer = threading.Thread(
-            target=self._produce, args=(pl, parsed, errors, abort, stopping), daemon=True)
+            target=self._produce, args=(pl, parsed, errors, abort, stopping), daemon=True
+        )
         writer = threading.Thread(
-            target=self._write, args=(cid, embedded, errors, abort), daemon=True)
+            target=self._write, args=(cid, embedded, errors, abort), daemon=True
+        )
         producer.start()
         writer.start()
         try:
@@ -172,22 +180,38 @@ class Indexer:
                     continue  # drain the producer without embedding
                 try:
                     vectors = self._embed(group)
-                except BaseException as exc:  # noqa: BLE001 - reported below
+                except Exception as exc:  # noqa: BLE001 - reported below
                     errors.append(exc)
                     abort.set()
                     continue
                 embedded.put((group, vectors))
+        except BaseException:
+            # Ctrl-C (or any other exit) while waiting: stop both threads before unwinding.
+            abort.set()
+            raise
         finally:
-            embedded.put(_END)
+            # The producer may be blocked on a full queue; keep taking from it until it ends.
+            while producer.is_alive():
+                try:
+                    parsed.get(timeout=0.1)
+                except queue.Empty:
+                    pass
             producer.join()
+            embedded.put(_END)
             writer.join()
         if errors:
             raise errors[0]
         if not self.stop():
             self.store.complete_corpus(cid)
 
-    def _produce(self, pl: CorpusPlan, out: queue.Queue, errors: list, abort: threading.Event,
-                 stopping: Callable[[], bool]) -> None:
+    def _produce(
+        self,
+        pl: CorpusPlan,
+        out: queue.Queue,
+        errors: list,
+        abort: threading.Event,
+        stopping: Callable[[], bool],
+    ) -> None:
         group: Group = []
         pending = 0
         try:
@@ -214,8 +238,9 @@ class Indexer:
         texts = [embedding_input(doc, ch, prefix) for doc, chunks in group for ch in chunks]
         return self.client.embed_many(texts, self.cfg.batch_size, self.cfg.workers)
 
-    def _write(self, corpus_id: int, inp: queue.Queue, errors: list,
-               abort: threading.Event) -> None:
+    def _write(
+        self, corpus_id: int, inp: queue.Queue, errors: list, abort: threading.Event
+    ) -> None:
         p = self.progress
         try:
             while True:
@@ -242,8 +267,9 @@ class Indexer:
                 pass
 
 
-def dry_run_counts(tree: Tree, corpus: Corpus, tok: Tokenizer, cfg: Config,
-                   max_files: int = 0) -> tuple[int, int, int]:
+def dry_run_counts(
+    tree: Tree, corpus: Corpus, tok: Tokenizer, cfg: Config, max_files: int = 0
+) -> tuple[int, int, int]:
     """(files, chunks, tokens) a corpus would produce: parses and chunks, embeds nothing."""
     files = chunks = tokens = 0
     for rel in iter_files(tree.root, corpus):
