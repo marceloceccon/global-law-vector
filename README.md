@@ -61,8 +61,9 @@ build; see [Building the HNSW index](#building-the-hnsw-index).
 
 ```sh
 git clone --recurse-submodules https://github.com/lexifina/global-law
+git clone https://github.com/marceloceccon/global-law-vector
+cd global-law-vector
 
-# in a checkout of this repository, next to global-law
 python -m venv .venv && . .venv/bin/activate
 pip install -e '.[tokenizer]'    # the bare CLI, plus the model's tokenizer for exact counts
 cp .env.example .env             # defaults match the containers above

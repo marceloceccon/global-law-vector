@@ -31,6 +31,11 @@ dependencies = [
     "psycopg[binary]>=3.1",
 ]
 
+[project.urls]
+Homepage = "https://github.com/marceloceccon/global-law-vector"
+Issues = "https://github.com/marceloceccon/global-law-vector/issues"
+Specification = "https://github.com/marceloceccon/global-law-vector/blob/main/specification.md"
+
 [project.optional-dependencies]
 tokenizer = ["tokenizers>=0.15"]
 tui = ["textual>=0.50"]
