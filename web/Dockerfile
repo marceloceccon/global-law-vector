@@ -1,12 +1,17 @@
-# Production image for the point-cloud viewer. Three stages so the final image carries only
-# Next's standalone server (no node_modules, no sources): about 200 MB.
+# Production image for the viewer: Next.js's standalone server and its static assets only,
+# no node_modules and no sources.
 #
-#   docker build -t utility-web web/
-#   docker run --rm -p 3000:3000 --network utility \
-#     -e DATABASE_URL=postgresql://utility:utility@utility-pgvector:5432/utility \
-#     -e TEI_URL=http://utility-embeddings:80 utility-web
+#   docker build -t glv-web web/
+#   docker run --rm -p 3000:3000 \
+#     -e DATABASE_URL=postgresql://user:password@db-host:5432/dbname \
+#     -e TEI_URL=http://embeddings-host:80 \
+#     -v ~/.cache/global-law-vector/projection.json:/data/projection.json:ro \
+#     -e GLV_PROJECTION=/data/projection.json \
+#     glv-web
 #
-# or, with the rest of the stack, `docker compose up -d --build web` in global-law-utility.
+# The container must reach the database (and, for TEI-embedded domain phrases, the
+# embeddings server) by those names; on a Docker network, add --network <name>. Without the
+# projection mount the viewer falls back to PCA.
 
 FROM node:24-alpine AS deps
 WORKDIR /app

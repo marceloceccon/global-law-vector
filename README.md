@@ -1,150 +1,366 @@
 # global-law-vector
 
-Semantic search over the law of the world. `glv` reads a chosen subset of
-[global-law](https://github.com/lexifina/global-law), the law of 211 jurisdictions as one git
-history, embeds every provision with a local embeddings server, and stores text, vectors and
-metadata in PostgreSQL + [pgvector](https://github.com/pgvector/pgvector). Then it answers
-"which provisions, anywhere, are about X" in any language.
+Semantic search over the law of the world. `glv` reads a chosen part of
+[global-law](https://github.com/lexifina/global-law), which holds the law of 211 jurisdictions
+as one git history, and embeds every provision with a multilingual model. It stores the text,
+the vectors and their provenance in PostgreSQL with
+[pgvector](https://github.com/pgvector/pgvector). The result answers "which provisions,
+anywhere, are about X", in any language, and every hit can be read back from global-law at the
+exact commit it was indexed from.
 
-Status: milestones M1 and M2 of [specification.md](specification.md) are implemented (discover,
-select, parse, chunk, embed, store, search, CLI) plus a first TUI. See the specification for the
-core concept, the information flow and the premises.
+![A 40,000-chunk sample of the index drawn by the web viewer, coloured by country](docs/images/viewer-by-country.png)
 
-## Five minutes to the first search
+*The web viewer in [`web/`](web/README.md) shows a country-balanced sample of 40,000 chunks
+from a 1.6-million-chunk index of ten countries. The 768-dimensional embeddings are laid out
+in three dimensions with UMAP and coloured by country.*
 
-Requirements: Python 3.11+, a clone of global-law with its submodules, and the two containers
-from the sibling project `global-law-utility` (text-embeddings-inference on port 8080 and
-pgvector on 5432):
+## Contents
+
+- [Requirements](#requirements)
+- [Quick start](#quick-start)
+- [Commands](#commands)
+- [Configuration](#configuration)
+- [The index](#the-index)
+- [Querying the index from your own code](#querying-the-index-from-your-own-code)
+- [How indexing works](#how-indexing-works)
+- [How search works](#how-search-works)
+- [Throughput and a rented GPU](#throughput-and-a-rented-gpu)
+- [Running in a container](#running-in-a-container)
+- [The web viewer](#the-web-viewer)
+- [Development](#development)
+- [Licence](#licence)
+
+## Requirements
+
+- Python 3.11 or later.
+- A clone of global-law with its submodules. A full checkout is about 21 GB, but only the
+  corpora you select are ever read.
+- A [text-embeddings-inference](https://github.com/huggingface/text-embeddings-inference)
+  (TEI) server running `Snowflake/snowflake-arctic-embed-m-v2.0`, the default model.
+- PostgreSQL with the pgvector extension, version 0.8 or later for the best filtered search
+  (see [How search works](#how-search-works)).
+
+The two services can run anywhere `glv` can reach over HTTP and the PostgreSQL protocol. On one
+machine with Docker:
+
+```sh
+docker run -d --name glv-embeddings -p 127.0.0.1:8080:80 \
+  ghcr.io/huggingface/text-embeddings-inference:cpu-latest \
+  --model-id Snowflake/snowflake-arctic-embed-m-v2.0
+
+docker run -d --name glv-pgvector -p 127.0.0.1:5432:5432 --shm-size=2g \
+  -e POSTGRES_USER=utility -e POSTGRES_PASSWORD=utility -e POSTGRES_DB=utility \
+  pgvector/pgvector:pg16
+```
+
+These match the defaults in `.env.example`, so nothing else needs configuring. Pick your own
+password for anything other than a local machine. The `--shm-size` matters for the HNSW index
+build; see [Building the HNSW index](#building-the-hnsw-index).
+
+## Quick start
 
 ```sh
 git clone --recurse-submodules https://github.com/lexifina/global-law
-cd global-law-utility && docker compose up -d && cd ..
 
-git clone <this repo> global-law-vector && cd global-law-vector
+# in a checkout of this repository, next to global-law
 python -m venv .venv && . .venv/bin/activate
-pip install -e '.[dev]'          # or `pip install -e .` for the bare CLI
-cp .env.example .env             # defaults match the containers; edit if needed
+pip install -e '.[tokenizer]'    # the bare CLI, plus the model's tokenizer for exact counts
+cp .env.example .env             # defaults match the containers above
 
-glv check                        # tree, embeddings server and database reachable?
-glv list                         # the 525 pinned corpora, 213 countries
-glv select --country malta --corpus brazil/national/acts --show
-glv index --dry-run              # parse and chunk, embed nothing
-glv index                        # embed and store; stop and rerun at will
-glv search "prazo de prescrição" --country brazil
-glv tui                          # or do all of the above interactively
+glv check                        # tree, embeddings server and database: found and answering?
+glv list --country malta         # what the tree holds for a country
+glv select --country malta --show   # choose, and see files, size and estimated time
+glv index --dry-run              # parse and chunk the selection, embed nothing
+glv index                        # embed and store; stop with Ctrl-C and rerun at will
+glv search "obligations of a landlord when the rent is increased" --country malta
 ```
 
-Every value in `.env` has a default that matches the containers on localhost. The global-law
-tree is found at `GLOBAL_LAW_PATH`, else at `./global-law` or `../global-law`.
+A search prints the score, the file in global-law, its title and citation, the heading path
+inside the provision and a snippet:
+
+```
+ 1. 0.515  malta/national/acts/cap/116/5.md
+    5. Renewals of tenancy and new tenancies.
+    # 5. Renewals of tenancy and new tenancies. (1) When a landlord intends to let or to renew the letting of - (a) a dwelling house at a rent higher than or on con…
+ 2. 0.481  malta/national/acts/cap/116/7.md
+    7. Tenancy agreements with effect from 1st April, 1939, or from later date, made before enactment of this Ordinance.
+    …
+```
+
+`glv tui` does the same interactively. It offers a selection screen with live cost totals, a
+run screen with progress and a search screen.
 
 ## Commands
 
-| Command | Does |
+| Command | What it does |
 | --- | --- |
-| `glv check` | Is the tree found, do the embeddings server and the database answer, and with which model. |
-| `glv list [--country X]` | Every corpus in the tree, marking the selected ones. |
-| `glv select --country X --corpus c/l/n --exclude … --all --clear --show` | Edit `selection.toml` and show its cost: files, bytes, estimated chunks and time. |
-| `glv index [--dry-run] [--country …] [--max-files N]` | Index the selection (or a one-off selection). Resumable: a rerun indexes only new, changed or deleted files. |
-| `glv status [--all]` | Per corpus: not indexed, partial, stale (corpus commit changed) or indexed. |
-| `glv search "question" [--country X] [--top N]` | Cosine search; prints score, path, title, citation, heading and a snippet. |
-| `glv reset` | Drop the schema (asks first). |
-| `glv project [--points 40000] [--fit 20000]` | Cache a 3-D UMAP layout of a country-balanced sample of the index for the web viewer (needs the `project` extra). |
-| `glv tui` | Select with live totals, run with progress, search with detail. |
+| `glv check` | Reports where the tree is and whether the embeddings server and the database answer, with which model and dimensions. |
+| `glv list [--country X]` | Lists every corpus in the tree, marking the selected ones. |
+| `glv select [--country X] [--corpus c/l/n] [--exclude X] [--all] [--clear] [--show]` | Edits `selection.toml` and shows what the selection costs in files, bytes, chunks and time. |
+| `glv index [--dry-run] [--country X] [--max-files N] [--no-build-index]` | Indexes the selection, or a one-off selection given by flags. It is resumable: a rerun touches only new, changed or deleted files. |
+| `glv status [--all]` | Shows each corpus as not indexed, partial (a run stopped), stale (the corpus has a newer commit) or indexed. |
+| `glv search "question" [--country X] [--corpus c/l/n] [--top N]` | Runs a semantic search and prints score, path, title, citation, heading and snippet. |
+| `glv reset` | Drops the index schema after asking for confirmation. |
+| `glv project [--points 40000] [--fit 20000]` | Caches a 3-D UMAP layout of a sample of the index for the web viewer. It needs the `project` extra. |
+| `glv tui` | Opens the terminal interface. It needs the `tui` extra. |
 
-All settings are environment variables, see `.env.example`: tree path, database URL, embeddings URL and optional API key, model, dimensions, chunk size, batch size, workers, timeout.
+`--country` and `--corpus` can be repeated. Country names and corpus paths are those of the
+global-law tree, for example `brazil` or `brazil/national/acts`. Exit codes are 0 on success,
+1 on a failure such as an unreachable service or a mismatched index, 2 on a usage error such as
+an unknown country, and 130 when interrupted.
 
-## How it works
+Optional extras install with pip: `tokenizer` (exact token counts), `tui` (Textual), `project`
+(UMAP and NumPy for `glv project`) and `dev` (tests and lint).
+
+## Configuration
+
+All settings are environment variables. `glv` also reads a `.env` file in the working
+directory, which never overrides the real environment. `.env.example` lists them with their
+defaults.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `GLOBAL_LAW_PATH` | `./global-law`, `../global-law` or `../../global-law` | Root of the global-law checkout. |
+| `DATABASE_URL` | `postgresql://utility:utility@127.0.0.1:5432/utility` | PostgreSQL connection string. |
+| `GLV_SCHEMA` | `global_law` | Schema holding the index. Use several to keep indexes side by side. |
+| `TEI_URL` | `http://127.0.0.1:8080` | Embeddings server. |
+| `TEI_API_KEY` | unset | Sent as `Authorization: Bearer …` for a remote server. |
+| `GLV_MODEL` | `Snowflake/snowflake-arctic-embed-m-v2.0` | Model the server must be running. |
+| `GLV_DIMS` | `768` | Embedding width. |
+| `GLV_MAX_TOKENS` | `8192` | The model's input limit; no chunk exceeds it. |
+| `GLV_QUERY_PREFIX` | `query: ` | Prepended to search queries, as the model expects. |
+| `GLV_DOCUMENT_PREFIX` | empty | Prepended to indexed text. The default model uses none. |
+| `GLV_VECTOR_TYPE` | `halfvec` | `halfvec` (16-bit) or `vector` (32-bit, twice the size). |
+| `GLV_CHUNK_TOKENS` | `1024` | Target chunk size in tokens. |
+| `GLV_BATCH_SIZE` | `16` | Chunks per embeddings request. TEI accepts 32 by default. |
+| `GLV_WORKERS` | `2` | Concurrent embeddings requests. |
+| `GLV_TEI_TIMEOUT` | `600` | Seconds to wait for one request. Keep it long on a CPU server. |
+| `GLV_TOKENIZER` | unset | Path to a `tokenizer.json`. Otherwise it is fetched from the Hugging Face hub once and cached. |
+| `HF_TOKEN` | unset | Only for that first tokenizer download, if the hub asks for it. |
+| `GLV_SELECTION` | `selection.toml` | Selection file. |
+| `GLV_CACHE_DIR` | `~/.cache/global-law-vector` | Tokenizer copy, corpus statistics and the projection file. |
+| `GLV_CHUNKS_PER_SECOND` | `1.5` | Throughput used for time estimates until a run has measured one. |
+
+The model, dimensions, vector type, chunker version, chunk size and document prefix are
+recorded in the index when it is created. `glv index` refuses to write into an index built with
+different values, because mixing them would silently corrupt the results. To change one,
+choose another `GLV_SCHEMA` or run `glv reset`.
+
+## The index
+
+One schema, `global_law` by default, holds four tables:
+
+| Table | One row per | Main columns |
+| --- | --- | --- |
+| `corpus` | indexed corpus | `path` (`germany/bund/acts`), `country`, `language`, `commit_sha` (the submodule commit indexed), `completed_at` (null while a run is in progress) |
+| `document` | provision file | `path` (relative to the global-law root), `title`, `citation`, `front_matter` (jsonb), `content_sha` (sha256 of the file) |
+| `chunk` | piece of a provision | `ordinal`, `heading_path` (`Chapter II > § 4`), `text`, `token_count`, `embedding` (`halfvec(768)`) |
+| `index_meta` | setting | `model`, `dims`, `vector_type`, `chunker_version`, `chunk_tokens`, `document_prefix`, `chunks_per_second` |
+
+The full definition is in [`src/global_law_vector/sql/001_schema.sql`](src/global_law_vector/sql/001_schema.sql).
+`chunk.embedding` has an HNSW index with cosine distance (`chunk_embedding_hnsw`).
+
+**What is embedded.** Each chunk is embedded as its document's title and heading path, a blank
+line, then the chunk text. A bare article such as São Paulo's `art-0001.md` thereby carries
+the act it belongs to. `chunk.text` stores the text alone.
+
+**Provenance.** `corpus.commit_sha` and `document.path` locate every hit in global-law exactly.
+`git -C global-law/<corpus path> show <commit_sha>:<path inside the corpus>` prints the
+provision as it was indexed, even after the corpus has moved on.
+
+**Size.** At 768 dimensions a `halfvec` takes 1.5 KB per chunk, and the HNSW index is of a
+similar size. The ten-country index behind the screenshot holds 1.6 million chunks. The whole
+tree would be about 5 million.
+
+## Querying the index from your own code
+
+The index is plain PostgreSQL, so any client can search it. There are two rules. Embed the
+question with the same model, prefixed with `query: `, and compare with cosine distance (`<=>`).
+
+From Python, with this package installed:
+
+```python
+from global_law_vector.config import Config
+from global_law_vector.embed import TEIClient
+from global_law_vector.search import search
+from global_law_vector.store import Store
+
+cfg = Config.from_env()
+with Store(cfg.database_url, cfg.schema, cfg.vector_type, cfg.dims) as store:
+    client = TEIClient(cfg.tei_url, api_key=cfg.tei_api_key)
+    for hit in search(store, client, "prazo de prescrição", countries=["brazil"], top=5):
+        print(f"{hit.score:.3f}", hit.path, hit.heading_path)
+```
+
+From SQL, given the query embedding as a pgvector literal `$1`. The literal comes from
+`POST /embed` on the TEI server with `{"inputs": "query: …"}`.
+
+```sql
+SET hnsw.ef_search = 100;                -- candidate list; pgvector's default is 40
+SET hnsw.iterative_scan = relaxed_order; -- pgvector 0.8+: keep scanning when a filter rejects rows
+
+SELECT 1 - (k.embedding <=> $1::halfvec(768)) AS score,
+       c.path AS corpus, c.commit_sha, d.path, d.title, d.citation, k.heading_path, k.text
+FROM global_law.chunk k
+JOIN global_law.document d ON d.id = k.document_id
+JOIN global_law.corpus   c ON c.id = d.corpus_id
+WHERE c.country = 'brazil'               -- optional
+ORDER BY k.embedding <=> $1::halfvec(768)
+LIMIT 10;
+```
+
+Read [How search works](#how-search-works) before relying on a filtered query like this one
+against a large index.
+
+## How indexing works
 
 ```
-discover → select → plan → parse → chunk → embed (TEI) → store (pgvector) → search
+discover → select → plan → parse → chunk → embed (TEI) → store (pgvector)
 ```
 
-- **Discover** reads the submodules pinned in the root tree (`git ls-tree`) and the manifest for
-  metadata. Nothing is ever written in the tree.
-- **Select** resolves countries and corpora to a list of corpus paths and prices it with cached
-  per-corpus file counts.
-- **Plan** compares each corpus on disk with the database by corpus commit and file hash.
-- **Parse** handles front matter, headings, bare text, and skips READMEs and the like.
-- **Chunk** keeps a provision whole when it fits the target (1,024 tokens by default) and
-  otherwise splits on headings then paragraphs, keeping the heading path.
-- **Embed** sends batches to text-embeddings-inference with retries, on a thread pool.
-- **Store** writes each group of documents in one transaction through COPY, and builds the HNSW
-  index once at the end.
-- **Search** prefixes the question with `query: `, embeds it and ranks chunks by cosine.
+- **Discover** lists the corpora pinned as submodules in the global-law tree (`git ls-tree`),
+  with metadata from its `manifest.json`. Nothing in the tree is ever written to.
+- **Select** turns countries and corpora into a list of corpus paths and prices it from cached
+  file counts.
+- **Plan** compares each corpus on disk with the database by file hash. Only new and changed
+  files are indexed, and only documents whose files are gone are deleted.
+- **Parse** reads front matter, title, citation and body, and skips files such as `README.md`
+  that are not law.
+- **Chunk** keeps a provision whole when it fits the 1,024-token target. A longer one is split
+  on its headings, then on paragraphs, with the heading path kept for each chunk. More than
+  99.9 % of files fit in one chunk.
+- **Embed** sends batches to TEI on a thread pool, with retries and back-off.
+- **Store** writes each group of documents and their chunks in one transaction, chunks through
+  `COPY`.
 
-The HNSW index is built once, at the end of a run, or with `glv index --build-index`. The
-build is parallel and needs real shared memory: the pgvector service in
-`global-law-utility/docker-compose.yml` sets `shm_size: 2gb` for that reason. Without it
-Postgres reports "could not resize shared memory segment … No space left on device" and
-`glv` retries the build without parallel workers, which is slower but works.
+Parsing, embedding and writing run in three threads, so the embeddings server never waits for
+the disk or the database. A run can be stopped at any moment, and a rerun continues from what
+was stored. A corpus counts as indexed only when every file of it has been written.
 
-The index records model, dimensions, vector type and chunker version; `glv` refuses to write into
-an index built with other settings. Use `GLV_SCHEMA` to keep several indexes side by side.
+### Building the HNSW index
 
-## Remote GPU
+The HNSW index is built once, after the first run, because building it before a bulk load is
+far slower. Later runs update rows under the existing index. `--no-build-index` defers the
+build when several runs follow each other.
 
-Embedding is the only slow stage, and it is plain HTTP, so the embeddings server can run on a
-rented GPU while the files and the database stay local. On a 6-core CPU this model embeds about
-1.5 chunks/s (Malta: 12 h, the whole tree: a month); on one rented RTX 4090 or L4 it is a few
-hundred chunks/s, so the whole tree is a few hours and a few dollars.
+A parallel build keeps its graph in shared memory. Docker gives a container 64 MB of `/dev/shm`
+unless told otherwise, and the build then fails with "could not resize shared memory segment …
+No space left on device". `glv` retries without parallel workers, which works but is a few
+times slower. Starting PostgreSQL with `--shm-size=2g` (or `shm_size: 2gb` in Compose) avoids
+the retry.
 
-1. Start a GPU pod (RunPod, Vast.ai, …) with the TEI CUDA image for its card, for example
-   `ghcr.io/huggingface/text-embeddings-inference:89-latest` on an RTX 4090 (`86-latest` on
-   A10/A100/RTX 30xx, `1.9` for Hopper). TEI reads its flags from environment variables, so set
-   these on the pod:
+## How search works
+
+`glv search` prefixes the question with `query: `, embeds it and ranks chunks by cosine
+similarity. Without a filter it uses the HNSW index with a candidate list of 100, which takes
+about 10 ms on the 1.6-million-chunk index. In the measurements below, HNSW found at least nine
+of the true top ten for every unfiltered query.
+
+Filters need more care, because HNSW applies them after finding its candidates. Ask a plain
+HNSW query for the top ten Maltese chunks in an index where Malta holds 0.1 % of the rows, and
+the index returns its 40 nearest candidates from the whole world. The filter then leaves one
+or none of them. `glv` avoids this in two ways:
+
+- A filter matching at most 200,000 chunks is answered by an exact scan of those chunks. That
+  takes about 20 ms for Malta, 0.15 s for Portugal and 1.5 s for Germany's 173,000 chunks, and
+  always returns the true top results.
+- A wider filter uses the HNSW index with pgvector 0.8's iterative scan, which keeps searching
+  until enough rows pass the filter.
+
+Measured on that index with three queries, each run with no filter and with five single-country
+filters, the top ten matched an exact scan in 16 of the 18 searches and shared nine of ten
+results in the other two. Plain HNSW returned fewer than ten results in 12 of the 15 filtered
+searches, and none at all in 10 of them.
+
+## Throughput and a rented GPU
+
+Embedding is the only slow stage. The default model on a six-core desktop CPU embeds about 1.5
+chunks per second, which is twelve hours for Malta's 67,000 files and over a month for the
+whole tree.
+
+Because the embeddings server speaks plain HTTP, it can run on a rented GPU while the files and
+the database stay local:
+
+1. Start a GPU instance with the TEI image built for its card, for example
+   `ghcr.io/huggingface/text-embeddings-inference:89-latest` on an RTX 4090 or `86-latest` on
+   an A10, A100 or RTX 30xx. The TEI documentation lists the images for other GPUs. TEI reads
+   its options from environment variables:
    ```sh
    MODEL_ID=Snowflake/snowflake-arctic-embed-m-v2.0
-   API_KEY=<a secret>              # the public URL is otherwise open to anyone
-   MAX_CLIENT_BATCH_SIZE=128       # chunks per request (default 32)
-   MAX_CONCURRENT_REQUESTS=4096    # the queue limit, counted in chunks (default 512)
-   MAX_BATCH_TOKENS=65536          # tokens per GPU batch (default 16384)
+   API_KEY=<a long random secret>   # without it the public URL is open to anyone
+   MAX_CLIENT_BATCH_SIZE=128        # chunks per request (default 32)
+   MAX_CONCURRENT_REQUESTS=4096     # queue limit, counted in chunks (default 512)
+   MAX_BATCH_TOKENS=65536           # tokens per GPU batch (default 16384)
    ```
-   Expose port 80 as an HTTP port; the provider gives an HTTPS proxy URL. A Hugging Face
-   Inference Endpoint running this model works the same way with its bearer token.
+   Expose port 80 over HTTPS. A Hugging Face Inference Endpoint serving the same model works
+   the same way with its token.
 2. In `.env`:
    ```sh
-   TEI_URL=https://<pod-id>-80.proxy.runpod.net   # or the endpoint URL
+   TEI_URL=https://<your instance>
    TEI_API_KEY=<the secret>
-   GLV_BATCH_SIZE=128     # match MAX_CLIENT_BATCH_SIZE; 32 if the pod keeps its default
+   GLV_BATCH_SIZE=128     # match MAX_CLIENT_BATCH_SIZE; 32 if the server keeps its default
    GLV_WORKERS=16
    ```
-   Over the internet each request costs a round trip of a few hundred milliseconds whatever
-   its size, so throughput is chunks-per-request × concurrent requests ÷ latency. The GPU is
-   idle most of the time; more GPUs do not help, larger requests do.
-3. `glv check`, then `glv index`. The run resumes anything a CPU run already stored, because
-   the model, dimensions and index settings are the same.
+   Over the internet every request costs a round trip of a few hundred milliseconds, so
+   throughput is chunks per request times concurrent requests divided by latency. Larger and
+   more concurrent requests help. More GPUs do not.
+3. Run `glv check`, then `glv index`. A run resumes whatever a CPU run already stored, since the
+   model and settings are the same.
 
-Measured on 2026-11-01 from a devcontainer in Brazil to a RunPod RTX-class pod with the
-default limits (32 per request, 16 workers): about 600 chunks/s, versus 1.5 chunks/s on the
-local 6-core CPU. Parsing, embedding and writing run in three threads so the local work
-overlaps the network. The client sends its own
-`User-Agent`, because the Cloudflare proxy in front of RunPod rejects Python's default one.
+Measured from a desktop in Brazil to a rented RTX-class GPU with TEI's default limits (32 chunks
+per request, 16 workers), throughput was about 600 chunks per second, 400 times the local CPU.
+The whole tree sends
+about 5.5 GB of text and receives about 14 GB of vectors. Stop the instance when `glv status`
+shows everything indexed.
 
-The whole tree sends about 5.5 GB of text up and receives about 14 GB of vectors; stop the pod
-when `glv status` shows every corpus indexed.
+Some hosted proxies reject Python's default `User-Agent`, so the client sends its own.
 
-## Seeing the index: `web/`
+## Running in a container
 
-`web/` is a small Next.js app that draws a country-balanced sample of the indexed chunks as
-an orbiting 3-D point cloud, coloured by country (or, on a toggle, by nearest of eight legal
-domains) with country filters. It reads the same `.env` and never writes to the database.
+From inside a container, `127.0.0.1` is the container itself, not the host, so the defaults do
+not reach services published on the host. Put the container on the same Docker network as the
+services and address them by name:
 
 ```sh
-pip install -e '.[project]' && glv project   # UMAP layout of 40,000 chunks, ~2 min, cached
-cd web && npm install && npm run dev         # http://localhost:3000
+docker network create glv
+docker network connect glv glv-embeddings
+docker network connect glv glv-pgvector
+docker network connect glv <your container>
 ```
 
-Without the `glv project` step the viewer falls back to a PCA fitted on the fly.
+Then set `TEI_URL=http://glv-embeddings:80` and
+`DATABASE_URL=postgresql://utility:utility@glv-pgvector:5432/utility` in `.env`.
 
-Details and the variables it reads are in [web/README.md](web/README.md).
+## The web viewer
+
+[`web/`](web/README.md) is a small Next.js application that draws a sample of the index as a
+3-D point cloud you can orbit. Points are coloured by country, or by the nearest of eight legal
+domains, and both can be filtered. It only reads from the database.
+
+```sh
+pip install -e '.[project]'
+glv project                      # UMAP layout of 40,000 chunks: about two minutes, cached
+cd web && npm install && npm run dev   # http://localhost:3000
+```
+
+Its own [README](web/README.md) covers the settings, serving it on a network and how the
+picture is computed.
 
 ## Development
 
 ```sh
 pip install -e '.[dev]'
-ruff check src tests
-pytest                 # unit tests on fixtures from seven real corpora
-pytest tests/test_integration.py   # end to end; runs only when both services are reachable
+ruff check src tests && ruff format --check src tests
+pytest                               # unit tests on files taken from seven real corpora
 ```
 
-Licence: CC0 1.0, like global-law.
+The integration test in `tests/test_integration.py` runs end to end against a real TEI
+server and database, and skips itself when they are not reachable. CI runs lint, format and
+tests on Python 3.11 and 3.13, and a typecheck and production build of the web viewer.
+
+[`specification.md`](specification.md) records the design: premises, information flow, data
+model and the decisions behind them.
+
+## Licence
+
+[CC0 1.0](LICENSE), like global-law: no rights reserved.

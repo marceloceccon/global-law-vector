@@ -17,3 +17,7 @@ selection.toml
 # Editors
 .vscode/
 .idea/
+
+# macOS
+.DS_Store
+._*

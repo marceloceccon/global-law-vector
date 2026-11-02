@@ -1,14 +1,32 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "global-law-vector"
-version = "0.1.0"
-description = "Vectorised semantic search over the global-law tree with pgvector"
+dynamic = ["version"]
+description = "Semantic search over the global-law corpus: provisions embedded into PostgreSQL with pgvector"
 readme = "README.md"
 license = "CC0-1.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Marcelo Ceccon" }]
 requires-python = ">=3.11"
+keywords = ["law", "legislation", "semantic search", "embeddings", "pgvector", "rag"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Legal Industry",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Database",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+    "Topic :: Text Processing :: Indexing",
+]
 dependencies = [
     "psycopg[binary]>=3.1",
 ]
@@ -17,10 +35,13 @@ dependencies = [
 tokenizer = ["tokenizers>=0.15"]
 tui = ["textual>=0.50"]
 project = ["umap-learn>=0.5", "numpy>=1.26"]
-dev = ["pytest>=8", "ruff>=0.4", "tokenizers>=0.15", "textual>=0.50"]
+dev = ["pytest>=8", "ruff>=0.4", "tokenizers>=0.15", "textual>=0.50", "numpy>=1.26"]
 
 [project.scripts]
 glv = "global_law_vector.cli:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "global_law_vector.__version__" }
 
 [tool.setuptools.packages.find]
 where = ["src"]

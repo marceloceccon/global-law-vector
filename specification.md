@@ -1,6 +1,9 @@
 # global-law-vector — Specification
 
-Version 0.2, 2026-10-31. Status: in development; milestones M1 and M2 implemented, M3 started.
+Version 0.3, 2026-11-02. Status: milestones M1 to M3 implemented, M4 in progress (section 10).
+
+This document records the design and the reasoning behind it. The README describes how to use
+the tool; where the two differ, the code and the README are current.
 
 ## 1. Core concept
 
@@ -211,31 +214,34 @@ Textual is the only UI dependency; the TUI is optional and the package works wit
 ```
 global-law-vector/
 ├── specification.md          this document
-├── README.md                 five-minute path
+├── README.md                 from clone to first search
 ├── pyproject.toml            package `global_law_vector`, console script `glv`
-├── selection.toml            the user's selection (git-ignored example provided)
+├── selection.example.toml    a selection to copy; `selection.toml` itself is git-ignored
 ├── src/global_law_vector/
-│   ├── config.py             env / .env: GLOBAL_LAW_PATH, DATABASE_URL, TEI_URL, model, dims
-│   ├── discover.py           manifest → corpora with SHA, file lists, counts, bytes
-│   ├── selection.py          selection.toml read/write, resolve to corpus paths, cost estimate
+│   ├── config.py             environment and .env: paths, URLs, model, dimensions, batching
+│   ├── discover.py           pinned submodules + manifest → corpora; file lists and counts
+│   ├── selection.py          selection.toml read/write, resolution to corpora, cost estimate
 │   ├── parse.py              front matter, title, body, citation, skip rules
 │   ├── chunk.py              token-aware splitting with heading paths
-│   ├── embed.py              TEI client: batching, concurrency, retry, hash cache
-│   ├── store.py              migrations, COPY loader, upsert, delete, HNSW build
-│   ├── search.py             query embedding + cosine top-k with filters
-│   ├── cli.py                `select`, `index`, `status`, `search`, `tui`
+│   ├── tokenizer.py          the model's tokenizer, or a heuristic when it is unavailable
+│   ├── embed.py              TEI client: batching, concurrency, retry, model check
+│   ├── index.py              plan + the three-thread parse/embed/write pipeline
+│   ├── store.py              schema, COPY loader, upsert, delete, HNSW build, search
+│   ├── search.py             query embedding + top-k with filters
+│   ├── project.py            `glv project`: cached 3-D UMAP layout for the viewer
+│   ├── cli.py                the `glv` commands
+│   ├── sql/001_schema.sql    the schema
 │   └── tui/                  Textual app: select, run, search screens
-├── sql/                      versioned schema migrations
+├── web/                      Next.js viewer of the index as a 3-D point cloud (read-only)
 └── tests/
-    ├── fixtures/             real files copied from six corpora of different shapes
-    ├── test_parse.py, test_chunk.py, test_selection.py, test_discover.py
-    └── test_integration.py   needs the Docker services; skipped otherwise
+    ├── fixtures/             real files copied from seven corpora of different shapes
+    └── test_*.py             unit tests; test_integration.py needs the services
 ```
 
 Dependencies: `psycopg[binary]` only. The HTTP client is `urllib`, TOML is `tomllib`, the front
 matter parser is forty lines (the corpora use flat `key: value` YAML), the CLI is `argparse`.
-Optional: `tokenizers` for exact counts (else a heuristic), `textual` for the TUI. No ML
-frameworks.
+Optional: `tokenizers` for exact counts (else a heuristic), `textual` for the TUI,
+`umap-learn` and `numpy` for `glv project`. No ML frameworks in the indexing path.
 
 ## 7. Storage schema (pgvector)
 
@@ -300,8 +306,9 @@ far smaller.
 
 ### 8.1 Embedding service
 
-The host runs Hugging Face text-embeddings-inference as container `utility-embeddings`, defined
-in `global-law-utility/docker-compose.yml`, serving `Snowflake/snowflake-arctic-embed-m-v2.0`.
+In the reference setup the host runs Hugging Face text-embeddings-inference as container
+`utility-embeddings`, defined in `global-law-utility/docker-compose.yml`, serving
+`Snowflake/snowflake-arctic-embed-m-v2.0`.
 
 | Property | Value |
 | --- | --- |
@@ -342,30 +349,41 @@ with its heading path, which is what a search result should land on.
 - Load first, build HNSW once, with `maintenance_work_mem` raised for the build. Re-indexing a
   changed corpus updates rows under the existing index.
 - A rerun compares corpus SHA and file hashes and touches only new, changed or deleted files.
+- Measured 2026-11-01 against a rented RTX-class GPU running TEI, from the same desktop over
+  the internet: about 600 chunks/s with 32 chunks per request and 16 concurrent requests. The
+  client, not the GPU, sets the pace: throughput is batch size × concurrency ÷ round-trip time.
 
-## 9. Open decisions
+### 8.4 Filtered search
 
-1. ~~Embedding model.~~ Closed 2026-10-31: `Snowflake/snowflake-arctic-embed-m-v2.0`, 768
-   dimensions, multilingual, already serving (section 8.1).
-2. **Starting selection.** Proposed: Brazil national plus one or two states, Germany, Malta and
-   the US federal code, to validate quality across languages before any multi-hour run.
-3. **Vector type.** Proposed and written into the schema: `halfvec(768)`; `vector(768)` is a
-   config switch.
-6. **Hardware for the full tree.** At 1.5 chunks/s on CPU the whole tree is a month of
-   embedding. Options: a GPU for the TEI container, a smaller multilingual model (at the cost of
-   quality), or accepting that the index covers a selection, which is what the tool is built
-   for.
-4. **In-force date per document in v1.** Costs one `git log` per file. Proposed: off by default,
-   `--with-dates` flag.
-5. **Chunk target size.** Proposed 1,024 tokens (section 8.2); to be checked against search
-   quality on the starting selection.
+HNSW finds its `ef_search` nearest candidates first and applies a `WHERE` clause afterwards, so
+a filter on a small country returns few or no rows. Measured on a 1.6 M-chunk index of ten
+countries, an unfiltered HNSW query was fine, but a single-country filter returned fewer than
+ten rows in 12 of 15 searches. Search therefore scans exactly when the filter matches at most
+200,000 chunks (20 ms for Malta, 1.5 s for Germany's 173,000), and otherwise uses HNSW with
+`ef_search = 100` and pgvector 0.8's iterative scan.
+
+## 9. Decisions
+
+1. **Embedding model.** Closed 2026-10-31: `Snowflake/snowflake-arctic-embed-m-v2.0`, 768
+   dimensions, multilingual (section 8.1).
+2. **Vector type.** Closed: `halfvec(768)`, half the size of `vector(768)`. The model's output
+   does not need 32-bit precision for ranking by cosine; `vector` remains a configuration
+   switch for anyone who wants to measure the difference.
+3. **Hardware for the full tree.** Closed 2026-11-01: embedding runs on a rented GPU when the
+   selection is large (section 8.3; README, "Throughput and a rented GPU"). The CPU server
+   remains enough for single corpora.
+4. **Starting selection.** Open. Indexed so far: ten countries, 170 corpora, 1.6 M chunks.
+5. **In-force date per document in v1.** Open. Costs one `git log` per file. Proposed: off by
+   default, a `--with-dates` flag.
+6. **Chunk target size.** Open. 1,024 tokens (section 8.2), to be checked against search quality
+   on a labelled set of queries.
 
 ## 10. Milestones
 
-| # | Deliverable | Done when |
-| --- | --- | --- |
-| M0 | Specification agreed, model and starting selection chosen | Open decisions closed |
-| M1 | `discover`, `selection`, `parse`, `chunk` with fixture tests; `glv select --show` and `glv index --dry-run` | Counts match `find` on the real tree |
-| M2 | `embed`, `store`, `search`; resumable; one small corpus end to end | `glv search` returns sensible hits for Malta |
-| M3 | TUI select / run / search screens | A user indexes Brazil without reading the README |
-| M4 | Full run over the starting selection, timings in README, CI (lint + tests), tag 0.1.0 | A stranger goes from clone to first search in five minutes |
+| # | Deliverable | Done when | State |
+| --- | --- | --- | --- |
+| M0 | Specification agreed, model and starting selection chosen | Open decisions closed | model chosen; selection open |
+| M1 | `discover`, `selection`, `parse`, `chunk` with fixture tests; `glv select --show` and `glv index --dry-run` | Counts match `find` on the real tree | done |
+| M2 | `embed`, `store`, `search`; resumable; one small corpus end to end | `glv search` returns sensible hits for Malta | done |
+| M3 | TUI select / run / search screens | A user indexes Brazil without reading the README | done |
+| M4 | Full run over the starting selection, timings in README, CI (lint + tests), tag 0.1.0 | A stranger goes from clone to first search in five minutes | timings and CI done; tag pending |
